@@ -1,4 +1,4 @@
-# Prerequisites
+# === C++ Stuff ===
 *.d
 
 # Compiled Object files
@@ -14,17 +14,14 @@
 # Linker files
 *.ilk
 
-# Debugger Files
+# Debugger files
 *.pdb
+*.dwo
 
 # Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
 
 # Compiled Static libraries
 *.lai
@@ -37,5 +34,33 @@
 *.out
 *.app
 
-# debug information files
-*.dwo
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build/
+
+# === Python Stuff ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+env/
+venv/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# ML models / dataset
+models/
+*.pth
+*.pt
+*.npz
+*.npy
+
+# === OS ===
+.DS_Store
+Thumbs.db
