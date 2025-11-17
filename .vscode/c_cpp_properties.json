@@ -4,7 +4,11 @@
       "name": "windows-gcc-x64",
       "includePath": [
         "${workspaceFolder}/**",
-        "${workspaceFolder}/GameProject/include"
+        "${workspaceFolder}/GameProject/include",
+        "${workspaceFolder}/GameProject/include/utils",
+        "${workspaceFolder}/GameProject/include/core",
+        "${workspaceFolder}/GameProject/include/input",
+        "${workspaceFolder}/GameProject/include/render"
       ],
       "compilerPath": "C:/mingw64/bin/gcc.exe",
       "cStandard": "${default}",
