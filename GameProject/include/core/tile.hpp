@@ -77,7 +77,7 @@ private:
             return {true, 2.0f, +1, +1};
 
         case TileType::SWAMP:
-            return {true, 2.5f, -2, -1.5f};  // 移动极慢，攻击受限
+            return {true, 2.5f, -2, -2};  // 移动极慢，攻击受限
 
         case TileType::RIVER:
             return {false, 0.0f, 0, 0};   // 默认不可走（需要桥）

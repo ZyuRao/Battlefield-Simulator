@@ -1,5 +1,5 @@
-#include "map.hpp"
-#include "FastNoiseLite.h"
+#include "core/map.hpp"
+#include "core/FastNoiseLite.h"
 //https://github.com/Auburn/FastNoiseLite
 
 
@@ -17,11 +17,16 @@ bool Map::inBounds(const Coord& c) const {
            c.y >= 0 && c.y < height;
 }
 
+Tile& Map::getTile(const Coord& c) {
+    return tiles[c.y][c.x];
+}
+
 const Tile& Map::getTile(const Coord& c) const {
     return tiles[c.y][c.x];
 }
 
-static void getNeighbors(const Map& map, const Coord& c, std::vector<Coord> & out) {
+
+void Map::getNeighbors(const Coord& c, std::vector<Coord>& out) const {
     out.clear();
 
     static const Coord disr4[4] = {
@@ -33,10 +38,32 @@ static void getNeighbors(const Map& map, const Coord& c, std::vector<Coord> & ou
 
     for(auto& d : disr4) {
         Coord n = c + d;
-        if(map.inBounds(n)) out.push_back(n);
+        if(inBounds(n)) out.push_back(n);
 
     }
 }
+void Map::getNeighbors(const Map& map, const Coord& c, std::vector<Coord> & out) {
+    map.getNeighbors(c, out);
+}
+
+void Map::getNeighbors8(const Map& map,
+                        const Coord& c,
+                        std::vector<Coord>& out)
+{
+    out.clear();
+
+    static const Coord dirs[8] = {
+        {-1,  0}, {1,  0}, {0, -1}, {0, 1},
+        {-1, -1}, {-1, 1}, {1, -1}, {1, 1}
+    };
+
+    for (auto& d : dirs) {
+        Coord n = c + d;
+        if (map.inBounds(n))
+            out.push_back(n);
+    }
+}
+
 
 
 bool Map::bfsReachable(const Coord& start, const Coord& goal) const {
@@ -53,7 +80,7 @@ bool Map::bfsReachable(const Coord& start, const Coord& goal) const {
 
         if(cur == goal) return true;
 
-        getNeighbors(this, cur, nbrs);
+        getNeighbors(cur, nbrs);
 
         for(auto& n : nbrs) {
             if(!visited[n.y][n.x] && getTile(n).isPassable()) {
@@ -74,6 +101,20 @@ bool Map::isReachable(const Coord& start, const Coord& goal) const {
         
     return bfsReachable(start, goal);
 }
+
+void Map::print() const
+{
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            const Tile& t = tiles[y][x];
+            std::cout << t.getSymbol();
+        }
+        std::cout << "\n";
+    }
+}
+//调试用
 
 
 
@@ -102,7 +143,7 @@ Map MapGenerator::generate() {
     
     generateTiles(map, heightMap, riverMask);
 
-    applySwampArdRivers(map);
+    applySwampArdRivers(map, riverMask);
 
     return map;
 }
@@ -115,12 +156,12 @@ void MapGenerator::generateHeightMap(std::vector<std::vector<float>> &h) {
 
     FastNoiseLite noise;
     noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    noise.SetFrequency(0.005f);
+    noise.SetFrequency(0.02f);
     noise.SetSeed(seed);
 
     for(int y = 0; y < height; ++y) {
         for(int x = 0; x < width; ++x){
-            float n = noise.GetNoise(x, y);
+            float n = noise.GetNoise((float)x, (float)y);
             n = n * 0.5f + 0.5f;
             h[y][x] = n;
         }
@@ -140,16 +181,16 @@ void MapGenerator::applyMountmainFormation(std::vector<std::vector<float>>& h) {
 
 
 void MapGenerator::carveSingleRiver(const Map& map, std::vector<std::vector<float>>& h,
-                                    const Coord& origin)
+     std::vector<std::vector<bool>>& riverMask, const Coord& origin)
 {
     Coord cur = origin;
+    std::vector<Coord> nbrs;
     for(int steps = 0; steps < 2 * width; steps++) {
-        h[cur.y][cur.x] = 0.0f;
-
-        std::vector<Coord> nbrs;
+        
+        riverMask[cur.y][cur.x] = true;
         Map::getNeighbors(map, cur, nbrs);
 
-        float bestH = 1.0f;
+        float bestH = h[cur.y][cur.x];
         Coord best = cur;
 
         for(auto n : nbrs){
@@ -169,18 +210,59 @@ void MapGenerator::carveSingleRiver(const Map& map, std::vector<std::vector<floa
     }
 }
 
-void MapGenerator::carveRivers(const Map& map, std::vector<std::vector<float>>& h) {
+void MapGenerator::carveRivers(const Map& map, std::vector<std::vector<float>>& h, 
+    std::vector<std::vector<bool>>& riverMask) {
     std::random_device rd;
     std::mt19937 gen(rd());
 
     int riverCount = 2 + ((gen()) % 3);
 
     for(int i = 0; i < riverCount; i++){
-        carveSingleRiver(map, h, Coord(gen() % width, gen() % height));
+        carveSingleRiver(map, h, riverMask, Coord(gen() % width, gen() % height));
     }
 
 }
 
+TileType MapGenerator::classifyHeight(float h) const {
+    if(h < 0.40f) return TileType::PLAIN;
+    else if (h < 0.55f) return TileType::FOREST;
+    else if (h < 0.75f) return TileType::HILL;
+    else return TileType::MOUNTAIN;
+}
 
+void MapGenerator::generateTiles(Map& map, const std::vector<std::vector<float>>& h, 
+        const std::vector<std::vector<bool>>& riverMask){
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+        {
+            Coord c{x, y};
+
+            if (riverMask[y][x])
+                map.getTile(c).setType(TileType::RIVER);
+            else
+                map.getTile(c).setType(classifyHeight(h[y][x]));
+        }     
+}
+void MapGenerator::applySwampArdRivers(
+    Map& map, const std::vector<std::vector<bool>>& riverMask
+) {
+    std::vector<Coord> nbrs;
+
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x){
+            if(!riverMask[y][x]) continue;
+
+             Coord c(x, y);
+
+             Map::getNeighbors8(map, c, nbrs);
+
+             for(auto& n : nbrs) {
+                auto t = map.getTile(n).getType();
+                if(t == TileType::PLAIN || t == TileType::FOREST){
+                    map.getTile(n).setType(TileType::SWAMP);
+                }
+             }
+        }
+}
 
 

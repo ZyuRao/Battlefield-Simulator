@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <random>
 #include "tile.hpp"
-#include "vec2.hpp"
+#include "utils/vec2.hpp"
 
 class Map {
 private:
@@ -22,11 +22,17 @@ public:
     int getHeight() const { return height; }
 
     bool inBounds(const Coord& c) const;
-    const Tile& getTile(const Coord& c) const;
+    Tile& getTile(const Coord& c);
+    const Tile& getTile(const Coord& c) const ;
 
+    void getNeighbors(const Coord& c, std::vector<Coord>& out) const ;
     static void getNeighbors(const Map& map, const Coord& c, std::vector<Coord>& out);
+    static void getNeighbors8(const Map& map, const Coord& c, std::vector<Coord>& out);
+
 
     bool isReachable(const Coord& start, const Coord& goal) const;
+    void print() const;
+
 };
 
 class MapGenerator {
@@ -43,10 +49,10 @@ private:
     void carveRivers(const Map& map, std::vector<std::vector<float>>& heightMap, std::vector<std::vector<bool>>& riverMask);
 
     TileType classifyHeight(float h) const;
-    void applySwampArdRivers(Map& map);
+    void applySwampArdRivers(Map& map, const std::vector<std::vector<bool>>& riverMask);
 
 
-    void generateTiles(Map &map, std::vector<std::vector<float>>& heightMap, std::vector<std::vector<bool>>& riverMask);
+    void generateTiles(Map &map,const std::vector<std::vector<float>>& heightMap, const std::vector<std::vector<bool>>& riverMask);
 
 
     bool validateMap(const Map& map, const Coord& baseA, const Coord& baseB);
