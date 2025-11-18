@@ -102,19 +102,79 @@ bool Map::isReachable(const Coord& start, const Coord& goal) const {
     return bfsReachable(start, goal);
 }
 
-void Map::print() const
-{
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            const Tile& t = tiles[y][x];
-            std::cout << t.getSymbol();
-        }
-        std::cout << "\n";
-    }
-}
+// void Map::print() const
+// {
+//     for (int y = 0; y < height; ++y)
+//     {
+//         for (int x = 0; x < width; ++x)
+//         {
+//             const Tile& t = tiles[y][x];
+//             std::cout << t.getSymbol();
+//         }
+//         std::cout << "\n";
+//     }
+// }
 //调试用
+
+void Map::findPathAStar (const Coord& start,const Coord& goal, std::vector<Coord>& outpath) const
+{
+    outpath.clear();
+    if (!inBounds(start) || !inBounds(goal)) return;
+    if (!getTile(start).isPassable() || !getTile(goal).isPassable())
+        return;
+    struct Node{
+       Coord pos;
+       float g;
+       float f;//f = g + h
+
+       bool operator<(const Node& other) const {
+            return f > other.f;
+       }
+    };
+
+    std::priority_queue<Node> open;
+    std::vector<std::vector<float>> gScore(
+        height, std::vector<float>(width, 1e9f)
+    );
+
+    std::vector<std::vector<Coord>> cameFrom(
+        height, std::vector<Coord>(width, Coord(-1, -1))
+    );
+
+    gScore[start.y][start.x] = 0.0f;
+    open.push({start, 0.0f, (float)Coord::mhtDistance(start, goal)});
+    std::vector<Coord> nbrs;
+
+    while(!open.empty()){
+        Node cur = open.top();
+        open.pop();
+
+        if(cur.pos == goal) {
+            Coord p = goal;
+            while(!(p == start)) {
+                outpath.push_back(p);
+                p = cameFrom[p.y][p.x];
+            }
+            outpath.push_back(start);
+            std::reverse(outpath.begin(), outpath.end());
+            return;
+        }
+        getNeighbors(cur.pos, nbrs);
+        for(const auto& n : nbrs){
+            const Tile& t = getTile(n);
+            if(!t.isPassable()) continue;
+
+            float tentativeG = cur.g + t.getMoveCost();
+
+            if(tentativeG < gScore[n.y][n.x]) {
+                gScore[n.y][n.x] = tentativeG;
+                cameFrom[n.y][n.x] = cur.pos;
+                float f = tentativeG + Coord::mhtDistance(n, goal);
+                open.push({n, tentativeG, f});
+            }
+        }
+    } 
+}
 
 
 
@@ -172,7 +232,7 @@ void MapGenerator::applyMountmainFormation(std::vector<std::vector<float>>& h) {
     for(int y = 0; y < height; ++y){
         for(int x = 0; x < width; ++x){
             float v = h[y][x];
-            if(v > 0.75f){
+            if(v > 0.9f){
                 h[y][x] = std::min(1.0f, v * 1.15f);
             }
         }
@@ -225,8 +285,8 @@ void MapGenerator::carveRivers(const Map& map, std::vector<std::vector<float>>& 
 
 TileType MapGenerator::classifyHeight(float h) const {
     if(h < 0.40f) return TileType::PLAIN;
-    else if (h < 0.55f) return TileType::FOREST;
-    else if (h < 0.75f) return TileType::HILL;
+    else if (h < 0.60f) return TileType::FOREST;
+    else if (h < 0.90f) return TileType::HILL;
     else return TileType::MOUNTAIN;
 }
 
@@ -264,5 +324,11 @@ void MapGenerator::applySwampArdRivers(
              }
         }
 }
+
+bool MapGenerator::validateMap(const Map& map, const Coord& baseA, const Coord& baseB) const {
+    return map.isReachable(baseA, baseB);
+}
+
+
 
 

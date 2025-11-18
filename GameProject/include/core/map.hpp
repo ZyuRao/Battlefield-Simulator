@@ -31,7 +31,11 @@ public:
 
 
     bool isReachable(const Coord& start, const Coord& goal) const;
-    void print() const;
+    void findPathAStar(const Coord& start,
+                   const Coord& goal,
+                   std::vector<Coord>& outPath) const;
+
+    // void print() const;
 
 };
 
@@ -55,7 +59,7 @@ private:
     void generateTiles(Map &map,const std::vector<std::vector<float>>& heightMap, const std::vector<std::vector<bool>>& riverMask);
 
 
-    bool validateMap(const Map& map, const Coord& baseA, const Coord& baseB);
+    bool validateMap(const Map& map, const Coord& baseA, const Coord& baseB) const ;
 
     void carveSingleRiver(const Map& map, std::vector<std::vector<float>>& heightMap, 
                         std::vector<std::vector<bool>>& riverMask, const Coord& origin);

@@ -83,7 +83,7 @@ private:
             return {false, 0.0f, 0, 0};   // 默认不可走（需要桥）
 
         case TileType::MOUNTAIN:
-            return {true, 3.0f, +2, +2};  // 可通行但代价最高，视野极佳
+            return {false, 0.0f, +2, +2};  // 可通行但代价最高，视野极佳
 
         }
         return {true, 1.0f, 0, 0};
