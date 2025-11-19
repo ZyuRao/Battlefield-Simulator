@@ -1,6 +1,7 @@
 # pragma once
 #include <vector>
 #include <string>
+#include "gameworld.hpp"
 #include "utils/vec2.hpp"
 #include "map.hpp"
 
@@ -26,6 +27,13 @@ enum class UnitType {
     Knight    // 骑士：高血、高护甲、移动快
 };
 
+
+enum class Faction {
+    A,
+    B
+};
+
+
 struct UnitStats {
     float maxHP;
     float attack;
@@ -47,7 +55,48 @@ struct UnitStats {
     }
 };
 
-class Unit {
+class IAttackable {
+public:
+    virtual void takeDamage(float dmg) = 0;
+    virtual bool isDestroyed() const = 0;
+    virtual Coord getPos() const = 0;
+    virtual ~IAttackable() = default;
+};
+
+
+class Base : public IAttackable {
+private:
+    Coord pos;
+    Faction faction;
+    float maxHp;
+    float hp;
+
+    bool destroyed = false;
+    float productCd;
+    float baseProductTime;
+
+public:
+    Base(const Coord& p, Faction f) : pos(p), faction(f), 
+            productCd(0.f), baseProductTime(3.f) {}
+
+    void update(float dt, GameWorld& world);
+
+    Unit* produceUnit(UnitType type);
+
+    Coord getPos() const override { return pos;}
+    Faction getFaction() const { return faction; }
+
+    void takeDamage(float dmg) override {
+        hp -= dmg;
+        if(hp <= 0 && !destroyed) destroyed = true;
+    }
+    bool isDestroyed() const override { return destroyed;}
+    std::string getSymbol() const {
+        return faction == Faction::A ? "A" : "B";
+    }
+};
+
+class Unit : public IAttackable {
 protected:
     UnitType type;
     Coord pos;
@@ -55,7 +104,7 @@ protected:
 
     UnitState state;
     UnitCommandType pendingCmd;
-    Unit* target;
+    IAttackable* target;
     Coord pendingMoveTarget;
     float attackCd;
     float moveAccumulator;
@@ -66,7 +115,7 @@ protected:
     UnitStats baseStats;
 
 public:
-    Unit(UnitType t, const const Coord& basePos);
+    Unit(UnitType t, const Coord& basePos);
 
     void update(float dt,
                 const Map& map, const std::vector<Unit*>& enemies);
@@ -76,7 +125,7 @@ public:
     void issueStop();
 
     bool isAlive() const { return state != UnitState::Dead; }
-    const Coord& getPos() const { return pos; }
+    Coord getPos() const override { return pos; }
     UnitType getType() const { return type; }
     float getHP() const { return hp; }
     UnitState getState() const { return state; }
@@ -90,7 +139,8 @@ public:
         return "?";
     }
 
-    void takeDamage(float dmg);
+    void takeDamage(float dmg) override;
+    bool isDestroyed() const override { return state == UnitState::Dead; }
 
 private:
     void updateIdle(float dt,

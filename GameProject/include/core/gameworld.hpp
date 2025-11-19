@@ -1,8 +1,7 @@
 #pragma once
 #include <vector>
 #include "map.hpp"
-#include "unit.hpp"
-#include "base.hpp"
+#include "Iattackable.hpp"
 
 class GameWorld {
 private:
