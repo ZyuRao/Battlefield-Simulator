@@ -113,6 +113,7 @@ protected:
     size_t pathIdx;
 
     UnitStats baseStats;
+    Faction owner;
 
 public:
     Unit(UnitType t, const Coord& basePos);
