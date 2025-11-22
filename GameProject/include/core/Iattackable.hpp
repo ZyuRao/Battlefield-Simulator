@@ -1,25 +1,11 @@
 # pragma once
 #include <vector>
 #include <string>
-#include "gameworld.hpp"
 #include "utils/vec2.hpp"
 #include "map.hpp"
+#include "behavior.hpp"
 
-enum class UnitState {
-    Idle,
-    Moving,
-    Attacking,
-    Chasing,
-    Dead
-};
 
-enum class UnitCommandType {
-    None,
-    MoveTo,
-    AttrackUnit,
-    Hold,
-    Stop
-};
 
 enum class UnitType {
     Infantry, //步兵：中等移动、中等血量、近战
@@ -97,63 +83,54 @@ public:
 };
 
 class Unit : public IAttackable {
-protected:
+public: 
     UnitType type;
     Coord pos;
     float hp;
 
-    UnitState state;
-    UnitCommandType pendingCmd;
-    IAttackable* target;
-    Coord pendingMoveTarget;
-    float attackCd;
-    float moveAccumulator;
-
-    std::vector<Coord> path;
-    size_t pathIdx;
-
     UnitStats baseStats;
     Faction owner;
 
+    std::unique_ptr<UnitBehavior> behavior;
+    //行为策略组合
+
 public:
-    Unit(UnitType t, const Coord& basePos);
+   Unit(UnitType t, const Coord& start, Faction faction)
+        : pos(start), type(t), owner(faction)
+    {
+        baseStats = UnitStats::getStats(t);
+        hp = baseStats.maxHP;
 
-    void update(float dt,
-                const Map& map, const std::vector<Unit*>& enemies);
-    
-    void issueMoveCommand(const Coord& dst);
-    void issueAttackCommand(Unit* t);
-    void issueStop();
+        behavior = std::make_unique<UnitBehavior>();
+    }
 
-    bool isAlive() const { return state != UnitState::Dead; }
-    Coord getPos() const override { return pos; }
-    UnitType getType() const { return type; }
-    float getHP() const { return hp; }
-    UnitState getState() const { return state; }
+     Coord getPos() const override { return pos; }
+
+    void takeDamage(float dmg) override {
+        float actual = std::max(0.f, dmg - baseStats.armor);
+        hp -= actual;
+        if (hp <= 0.f && !behavior->isDead()) {
+            hp = 0.f;
+            behavior->onKilled(*this);
+        }
+    }
+
+    bool isDestroyed() const override {
+        return behavior->isDead();
+    }
+
+    bool isAlive() const { return !behavior->isDead(); }
 
     std::string getSymbol() const {
-        switch(type) {
+        switch (type) {
             case UnitType::Infantry: return "I";
-            case UnitType::Archer: return "A";
-            case UnitType::Knight: return "K";
+            case UnitType::Archer:   return "A";
+            case UnitType::Knight:   return "K";
         }
         return "?";
     }
-
-    void takeDamage(float dmg) override;
-    bool isDestroyed() const override { return state == UnitState::Dead; }
-
-private:
-    void updateIdle(float dt,
-                    const Map& map,
-                    const std::vector<Unit*>& enemies);
-    void updateMoving(float dt, const Map& map);
-    void updateAttacking(float dt, const Map& map);
-    void updateChasing(float dt, const Map& map);
-
-    void computePath(const Coord& dst, const Map& map);
-    void moveStep(float dt, const Map& map);
-
-    Unit* findNearestEnemy(const Map& map, const std::vector<Unit*>& enemies) const;
-    bool inAttackRange(Unit* e, const Map& map) const;
+    
+    void update(float dt, const Map& map, const std::vector<IAttackable*>& enemies) {
+        behavior->update(*this, dt, map, enemies);
+    }
 };
