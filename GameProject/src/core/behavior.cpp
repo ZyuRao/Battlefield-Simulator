@@ -133,18 +133,29 @@ IAttackable* DefaultAttackBehavior::findNearest(
     const Unit& u, const Map& map,
     const std::vector<IAttackable*>& visibleEnemies
 ) const {
-    IAttackable* best = nullptr;
-    float bestDist = 1e9f;
+    IAttackable* bestBase = nullptr;
+    float bestBaseDist = 1e9f;
+
+    IAttackable* bestUnit = nullptr;
+    float bestUnitDist = 1e9f;
 
     for(IAttackable* e : visibleEnemies) {
         if(!e || e->isDestroyed()) continue;
         float d = self.pos.mhtDistanceTo(e->getPos());
-        if(d < bestDist) {
-            bestDist = d;
-            best = e;
+        if (e->getAttackableType() == AttackableType::Base) {
+            if (d < bestBaseDist) {
+                bestBaseDist = d;
+                bestBase = e;
+            }
+        } else {
+            if (d < bestUnitDist) {
+                bestUnitDist = d;
+                bestUnit = e;
+            }
         }
     }
-    return best;
+    if(bestBase) return bestBase;
+    return bestUnit;
 } 
 
 bool DefaultAttackBehavior::inAttackRange(
@@ -217,10 +228,142 @@ void UnitBehavior::update(Unit& u, float dt, const Map& map
             attack->update(u, dt, map);
             break;
         case UnitState::Chasing:
+            IAttackable* t = attack->getTarget();
+            if (!t || t->isDestroyed()) {
+                stateMachine->set(UnitState::Idle);
+                break;
+            }
+            Coord curTarget = t->getPos(); 
+            // 若进入射程 → 切换到 Attacking
+            if (attack->inAttackRange(u, map, t)) {
+                stateMachine->set(UnitState::Attacking);
+                break;
+            }
+
+            // 否则继续追击 target
+            if (!movement->hasLastTarget() || 
+                movement->getLastTarget() != curTarget)
+            {
+                movement->setMoveTarget(curTarget, map, u);
+                movement->setLastTarget(curTarget);
+            }
+
             movement->update(u, dt, map);
             break;
         default:
             break;
     }
 
+}
+
+
+BaseState DefaultBaseStateMachine::get() const { return state; }
+void DefaultBaseStateMachine::set(BaseState s) { state = s; }
+
+void BaseCommandBehavior::issueProduce(UnitType t) {
+    pendingQueue.push(t);
+}
+
+bool BaseCommandBehavior::hasPending() const {
+    return !pendingQueue.empty();
+}
+
+UnitType BaseCommandBehavior::nextPending() const {
+    return pendingQueue.front();
+}
+
+void BaseCommandBehavior::pop() {
+    pendingQueue.pop();
+}
+
+void BaseCommandBehavior::clear() {
+    while (!pendingQueue.empty()) pendingQueue.pop();
+}
+
+void PeriodicProductionBehavior::reset(float p) {
+    period = p;
+    timer = 0.f;
+}
+
+bool PeriodicProductionBehavior::triggered(float dt) {
+    timer += dt;
+    if(timer >= period) {
+        timer -= period;
+        return true;
+    }
+    return false;
+}
+
+
+
+void BaseSpawnBehavior::begin(UnitType t, Base& self) {
+    currentType = t;
+    cd = self.baseProductTime;  // 从 Base 读取生产时间
+}
+
+bool BaseSpawnBehavior::update(float dt, Base& self, GameWorld& world) {
+    cd -= dt;
+    return cd <= 0.f;
+}
+
+BaseBehavior::BaseBehavior() {
+    spawn        = std::make_unique<BaseSpawnBehavior>();
+    command      = std::make_unique<BaseCommandBehavior>();
+    stateMachine = std::make_unique<DefaultBaseStateMachine>();
+    periodic     = std::make_unique<PeriodicProductionBehavior>();
+}
+
+void BaseBehavior::issueProduce(UnitType t) {
+    command->issueProduce(t);
+}
+
+bool BaseBehavior::isDead() const {
+    return stateMachine->get() == BaseState::Dead;
+}
+
+void BaseBehavior::reqSpawn(Base& self, GameWorld world, UnitType t){
+    world.baseSystem.spawnUnit(t, self, world);
+}
+
+void BaseBehavior::onKilled(Base& self) {
+    stateMachine->set(BaseState::Dead);
+}
+
+void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
+    if(isDead()) return;
+
+    BaseState st = stateMachine->get();
+
+    switch(st) {
+        case BaseState::Idle: {
+            // 检查是否有生产命令
+            if (command->hasPending()) {
+                UnitType t = command->nextPending();
+                command->pop();
+
+                spawn->begin(t, self);
+                stateMachine->set(BaseState::Producing);
+                break;
+            }
+            
+            if(periodic->triggered(dt)) {
+                UnitType defaultUnit = UnitType::Infantry;
+                spawn->begin(defaultUnit, self);
+                stateMachine->set(BaseState::Producing);
+            }
+            break;
+        }
+
+        case BaseState::Producing: {
+            if(spawn->update(dt, self)) {
+                UnitType t = spawn->type();
+                reqSpawn(self, world, t);
+                stateMachine->set(BaseState::Idle)
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
 }

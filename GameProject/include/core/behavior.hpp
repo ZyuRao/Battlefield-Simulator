@@ -8,6 +8,8 @@
 
 // 前置声明
 class Unit;
+class Base;
+class GameWorld;
 
 /*====================================
     Enum: UnitState / CommandType
@@ -25,6 +27,12 @@ enum class UnitCommandType {
     MoveTo,
     AttackUnit,
     Stop
+};
+
+enum class BaseState {
+    Idle,
+    Producing,
+    Dead
 };
 
 /*====================================
@@ -95,9 +103,17 @@ private:
     std::vector<Coord> path;
     size_t idx = 0;
     float accumulator = 0.f;
+    Coord lastChaseTarget;
+    bool hasLastTarget;
 public:
     void setMoveTarget(const Coord& dst, const Map& map, Unit& u) override;
     void update(Unit& u, float dt, const Map& map) override;
+    Coord getLastTarget() const { return lastChaseTarget; }
+    bool hasLastTarget() const { return hasLast; }
+    void setLastTarget(const Coord& c) {
+        lastChaseTarget = c;
+        hasLast = true;
+    }
 };
 
 /*====================================
@@ -107,7 +123,9 @@ class IAttackBehavior {
 public:
     virtual ~IAttackBehavior() = default;
     virtual void setTarget(IAttackable* t) = 0;
-    virtual void update(Unit& u, float dt, const Map& map) = 0;
+    virtual IAttackable* getTarget() const = 0;
+    virtual void update(Unit& u, float dt, const Map& map
+                        const std::vector<IAttackable*>& visibleEnemies) = 0;
 };
 
 class DefaultAttackBehavior : public IAttackBehavior {
@@ -123,6 +141,7 @@ private:
                        const Map& map,
                        IAttackable* t) const;
 public:
+    IAttackable* getTarget() const override {return target};
     void setTarget(IAttackable* t) override;
     void update(Unit& u, float dt, const Map& map,
                 const std::vector<IAttackable*>& visibleEnemies) override;
@@ -175,5 +194,70 @@ public:
                 const std::vector<IAttackable*>& enemies);
 };
 
+
+
+class BaseStateMachine {
+public:
+    virtual ~BaseStateMachine() = default;
+    virtual BaseState get() const = 0;
+    virtual void set(BaseState s) = 0;
+};
+
+class DefaultBaseStateMachine : public BaseStateMachine {
+private:
+    BaseState state = BaseState::Idle;
+public:
+    BaseState get() const override;
+    void set(BaseState s) override;
+}
+
+class BaseCommandBehavior {
+private:
+    std::queue<UnitType> pendingQueue;
+public:
+    void issueProduce(UnitType t);
+    bool hasPending() const;
+    UnitType nestPending() const;
+    void pop() ;
+    void clear();
+};
+
+class PeriodicProductionBehavior {
+private:
+    floar timer = 0.f;
+    float period = 3.f;
+public:
+    void reset(float p);
+    bool triggered(float dt);
+}
+
+
+class BaseSpawnBehavior {
+private:
+    UnitType current;
+    float cd = 0.f;
+public:
+    void begin(UnitType t, Base& self);
+    bool update(Base& self, float dt, GameWorld& world);
+    Unittype type() const;
+
+};
+
+class BaseBehavior {
+private:
+    std::unique_ptr<BaseSpawnBehavior> spawn;
+    std::unique_ptr<BaseCommandBehavior> command;
+    std::unique_ptr<BaseStateMachine> stateMachine;
+    std::unique_ptr<PeriodicProductionBehavior> periodic;
+
+    void reqSpawn(Base& self, GameWorld& world, UnitType t);
+public:
+    BaseBehavior();
+    void issueProduce(UnitType t);
+    bool isDead() const;
+    void onKilled(Base& self);
+
+    void update(Base& self, float dt, GameWorld& world);
+};
 
 

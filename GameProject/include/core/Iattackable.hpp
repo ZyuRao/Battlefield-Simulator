@@ -5,7 +5,7 @@
 #include "map.hpp"
 #include "behavior.hpp"
 
-
+class GameWorld;
 
 enum class UnitType {
     Infantry, //步兵：中等移动、中等血量、近战
@@ -17,6 +17,11 @@ enum class UnitType {
 enum class Faction {
     A,
     B
+};
+
+enum AttackableType {
+    UNIT,
+    BASE
 };
 
 
@@ -46,6 +51,7 @@ public:
     virtual void takeDamage(float dmg) = 0;
     virtual bool isDestroyed() const = 0;
     virtual Coord getPos() const = 0;
+    virtual AttackableType getAttackType() const = 0;
     virtual ~IAttackable() = default;
 };
 
@@ -54,32 +60,42 @@ class Base : public IAttackable {
 private:
     Coord pos;
     Faction faction;
-    float maxHp;
+    float maxHp = 500;
     float hp;
 
-    bool destroyed = false;
-    float productCd;
-    float baseProductTime;
+    float baseProductTime = 3.f;
+
+    std::unique_ptr<BaseBehavior> behavior;
 
 public:
-    Base(const Coord& p, Faction f) : pos(p), faction(f), 
-            productCd(0.f), baseProductTime(3.f) {}
-
-    void update(float dt, GameWorld& world);
-
-    Unit* produceUnit(UnitType type);
-
-    Coord getPos() const override { return pos;}
-    Faction getFaction() const { return faction; }
-
-    void takeDamage(float dmg) override {
-        hp -= dmg;
-        if(hp <= 0 && !destroyed) destroyed = true;
+    Base(const Coord& p, Faction f) : pos(p), faction(f) {
+        behavior = std::make_unique<BaseBehavior>();
     }
-    bool isDestroyed() const override { return destroyed;}
+
+    void update(float dt, GameWorld& world){
+        behavior->update(*this, dt, world);
+    }
+
+
+    Coord getPos() const override { return pos; }
+    AttackableType getAttackableType() const override {
+        return AttackableType::Base;
+    }
+
     std::string getSymbol() const {
         return faction == Faction::A ? "A" : "B";
     }
+
+    void takeDamage(float dmg) override {
+        hp -= dmg;
+        if(hp <= 0 && !behavior->isDead()){
+            hp = 0;
+            behavior->onKilled(*this);
+        }
+    }
+    bool isDestroyed() const override {
+        return behavior->isDead();
+    };
 };
 
 class Unit : public IAttackable {
@@ -104,7 +120,11 @@ public:
         behavior = std::make_unique<UnitBehavior>();
     }
 
-     Coord getPos() const override { return pos; }
+    Coord getPos() const override { return pos; }
+
+    AttackableType getAttackType() const override {
+        return AttackableType::UNIT;
+    }
 
     void takeDamage(float dmg) override {
         float actual = std::max(0.f, dmg - baseStats.armor);
