@@ -11,8 +11,6 @@
 
 
 
-class GameWorld;
-
 class TimeManager {
 private:
     std::chrono::steady_clock::time_point lastTick;
@@ -59,6 +57,12 @@ pubilc:
 
     void update(GameWorld& world);
 };
+class AttackSystem {
+public:
+    AttackSystem() = default;
+
+    void update(GameWorld& world, float dt);
+};
 
 class CleanupSystem {
 public:
@@ -96,6 +100,9 @@ private:
     std::vector<std::unique_ptr<Unit>> unitsA;
     std::vector<std::unique_ptr<Unit>> unitsB;
 
+    std::vector<IAttackable*> enemiesA;
+    std::vector<IAttackable*> enemiesB;
+
      // --- 系统层 ---
     MovementSystem movementSystem;
     VisionSystem   visionSystem;
@@ -120,8 +127,7 @@ public:
     void startRenderThread();
     void stopRenderThread();
 
-    void collectEnemies(Faction selfFaction,
-                        std::vector<IAttackable*>& out) const;
+    
     bool isTileFree(const Coord& c) const;                    
 
 };

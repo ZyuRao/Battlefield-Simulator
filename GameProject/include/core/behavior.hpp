@@ -1,7 +1,5 @@
 #pragma once 
 #include "map.hpp"
-#include "Iattackable.hpp"
-#include "gameworld.hpp"
 #include <algorithm>
 #include <memory>
 
@@ -103,15 +101,15 @@ private:
     std::vector<Coord> path;
     size_t idx = 0;
     float accumulator = 0.f;
-    Coord lastChaseTarget;
-    bool hasLastTarget;
+    Coord lastTarget;
+    bool hasLast;
 public:
     void setMoveTarget(const Coord& dst, const Map& map, Unit& u) override;
     void update(Unit& u, float dt, const Map& map) override;
-    Coord getLastTarget() const { return lastChaseTarget; }
+    Coord getLastTarget() const { return lastTarget; }
     bool hasLastTarget() const { return hasLast; }
     void setLastTarget(const Coord& c) {
-        lastChaseTarget = c;
+        lastTarget = c;
         hasLast = true;
     }
 };
@@ -126,13 +124,21 @@ public:
     virtual IAttackable* getTarget() const = 0;
     virtual void update(Unit& u, float dt, const Map& map
                         const std::vector<IAttackable*>& visibleEnemies) = 0;
+    virtual IAttackable* findNearest(const Unit& self,
+                             const Map& map,
+                             const std::vector<IAttackable*>& visibleEnemies) const;
+
+    virtual bool inAttackRange(const Unit& self,
+                       const Map& map,
+                       IAttackable* t) const;
 };
 
 class DefaultAttackBehavior : public IAttackBehavior {
 private:
     IAttackable* target = nullptr;
     float cd = 0.f;
-
+  
+public:
     IAttackable* findNearest(const Unit& self,
                              const Map& map,
                              const std::vector<IAttackable*>& visibleEnemies) const;
@@ -140,7 +146,6 @@ private:
     bool inAttackRange(const Unit& self,
                        const Map& map,
                        IAttackable* t) const;
-public:
     IAttackable* getTarget() const override {return target};
     void setTarget(IAttackable* t) override;
     void update(Unit& u, float dt, const Map& map,
@@ -190,8 +195,11 @@ public:
     bool isDead() const;
     void onKilled(Unit& u);
 
-    void update(Unit& u, float dt, const Map& map,
-                const std::vector<IAttackable*>& enemies);
+    void tickVision(Unit& u, const Map& map, 
+                    const std::vector<IAttackable*>& enenmies);
+    void tickMovement(Unit& u, float dt, const Map& map);
+    void tickAttack(Unit& u, float dt, const Map& map,
+        const std::vector<IAttackable*>& visibleEnemies);
 };
 
 

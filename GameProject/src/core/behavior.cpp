@@ -62,9 +62,14 @@ void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
     float sp - terrainSpend(u, map.getTile(u.pos));
 
     accumulator += sp * dt;
-    while(accumulator >=  1.0f) {
+    while(accumulator >=  1.0f && idx + 1 < path.size()) {
         accumulator -= 1.f;
         u.pos = path[++idx];
+    }
+
+    if (idx >= path.size()) {
+        // 路径走完后留给上层（UnitBehavior）去把状态改成 Idle
+        path.clear();
     }
 }
 
@@ -89,7 +94,7 @@ const std::vector<IAttackable*>& DefaultVisionBehavior::getVisible() const {
     return visible;
 }
 
-void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map
+void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
         const std::vector<IAttackable*>& visibleEnemies) {
     if(cd > 0) cd -= dt;
 
@@ -170,7 +175,7 @@ bool DefaultAttackBehavior::inAttackRange(
 }
 
 UnitBehavior::UnitBehavior() {
-    movement = std::make_unique<DefaultMovementBehavior>;
+    movement = std::make_unique<DefaultMovementBehavior>();
     attack = std:::make_unique<DefaultAttackBehavior>();
     command      = std::make_unique<DefaultCommandBehavior>();
     vision       = std::make_unique<DefaultVisionBehavior>();
@@ -190,70 +195,99 @@ void UnitBehavior::onKilled(Unit& u) {
 }
 
 
-void UnitBehavior::update(Unit& u, float dt, const Map& map
-                         std::vector<IAttackable*> enemies)
-{
+void UnitBehavior::tickVision(
+    Unit& u, const Map& map, 
+    const std::vector<IAttackable*>& enemies
+) {
     if(isDead()) return;
+    vision->updateVisible(u, map, enemies);
+}
+
+void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
+    if(isDead()) return;
+
+    UnitState st = stateMachine->get();
+
+    if(st == UnitState::Moving || st == UnitState::Chasing) {
+        movement->update(u, dt, map);
+
+        if(path.empty()) {
+            stateMachine->set(UnitState::Idle);
+        }
+    }
+}
+
+void UnitBehavior::tickAttack(
+    Unit& u, float dt, const Map& map,
+    const std::vector<IAttackable*>& eneimes
+) {
+    if(isDead()) return;
+
     switch(command->pendingType()) {
         case UnitCommandType::MoveTo:
-        movement->setMoveTarget(command->pendingMoveTarget(), map, u);
-        stateMachine->set(UnitState::Moving);
-        break;
-
+            movement->setMoveTarget(command->pendingMoveTarget(), map, u);
+            stateMachine->set(UnitState::Moving);
+            break;
         case UnitCommandType::AttackUnit:
             attack->setTarget(command->pendingAttackTarget());
             stateMachine->set(UnitState::Attacking);
             break;
-
         case UnitCommandType::Stop:
+            movement->setMoveTarget(nullptr, map, u);
             stateMachine->set(UnitState::Idle);
             break;
-
         default:
             break;
     }
 
     command->clear();
-    vision->updateVisible(u, map, allEnemies);
+
+    vision->updateVisible(u, map, enemies);
     const auto& visible = vision->getVisible();
-    
-    switch (stateMachine->get()) {
+
+    UnitState st = stateMachine->get();
+
+    switch(st) {
         case UnitState::Idle:
-            attack->update(u, dt, map);
-            break;
-        case UnitState::Moving:
-            movement->update(u, dt, map);
+            attack->update(u, dt, map, visible);
             break;
         case UnitState::Attacking:
-            attack->update(u, dt, map);
+            attack->update(u, dt, map, visible);
+            IAttackable* t = attack->getTarget();
+            if(!t || t->isDestroyed()) {
+                stateMachine->set(UnitState::Idle);
+                break;
+            }
+
+            if(attack->inAttackRange(u, map, t)) {
+                stateMachine->set(UnitState::Chasing);
+                movement->setMoveTarget(t->getPos(), map, u);
+            }
             break;
         case UnitState::Chasing:
             IAttackable* t = attack->getTarget();
+
             if (!t || t->isDestroyed()) {
                 stateMachine->set(UnitState::Idle);
                 break;
             }
-            Coord curTarget = t->getPos(); 
-            // 若进入射程 → 切换到 Attacking
+            Coord curTargetPos = t->getPos();
+            // 进入射程 → 切攻击
             if (attack->inAttackRange(u, map, t)) {
                 stateMachine->set(UnitState::Attacking);
                 break;
             }
-
-            // 否则继续追击 target
-            if (!movement->hasLastTarget() || 
-                movement->getLastTarget() != curTarget)
+            // 只有当目标移动过才重新规划路径
+            if (!movement->hasLastTarget() ||
+                movement->getLastTarget() != curTargetPos)
             {
-                movement->setMoveTarget(curTarget, map, u);
-                movement->setLastTarget(curTarget);
+                movement->setMoveTarget(curTargetPos, map, u);
+                movement->setLastTarget(curTargetPos);
             }
-
-            movement->update(u, dt, map);
             break;
         default:
             break;
     }
-
 }
 
 

@@ -53,6 +53,7 @@ public:
     virtual Coord getPos() const = 0;
     virtual AttackableType getAttackType() const = 0;
     virtual ~IAttackable() = default;
+    virtual Faction getFaction() const = 0;
 };
 
 
@@ -81,6 +82,7 @@ public:
     AttackableType getAttackableType() const override {
         return AttackableType::Base;
     }
+    Faction getFaction() const { returm faction}
 
     std::string getSymbol() const {
         return faction == Faction::A ? "A" : "B";
@@ -126,6 +128,7 @@ public:
         return AttackableType::UNIT;
     }
 
+    Faction getFaction() const { return owner; }
     void takeDamage(float dmg) override {
         float actual = std::max(0.f, dmg - baseStats.armor);
         hp -= actual;

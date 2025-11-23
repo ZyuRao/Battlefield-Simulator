@@ -91,3 +91,112 @@ TaskPool::submit(Job job) {
 
     cv.notify_one();
 }
+
+
+void BaseSystem::update(GameWorld& world, float dt) {
+    if (world.baseA && !world.baseA->isDestroyed()) {
+        world.baseA->update(dt, world);
+    }
+
+    if (world.baseB && !world.baseB->isDestroyed()) {
+        world.baseB->update(dt, world);
+    }
+}
+
+void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) {
+    Coord spawnPos = findSpawnPos(base, world);
+    auto u = std::make_unique<Unit>(t, spawnPos, base.getFaction());
+
+    if(base.getFaction() == Faction::A) {
+        world.unitsA.push_back(std::move(u));
+    } else {
+        world.unitsB.pusn_back(std::move(u));
+    }
+}
+
+Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) {
+    Coord c = base.getPos();
+
+    std::vector<Coord> nbrs;
+    world.map.getNeighbors8(world.map, c, nbrs);
+    for(const Coord& n : nbrs) {
+        if(world.map.getTile(n).isPassable() && world.isTileFree(n)) {
+            return n;
+        }
+    }
+
+    if(world.map.getTile(c).isPassable() && world.isTileFree(c)) return c
+}
+
+void MovementSystem::update(GameWorld& world, float dt)
+{
+    // A 阵营
+    for (auto& u : world.getUnitsA()) {
+        if (u->isAlive()) {
+            u->behavior->tickMovement(*u, dt, world.map);
+        }
+    }
+
+    // B 阵营
+    for (auto& u : world.getUnitsB()) {
+        if (u->isAlive()) {
+            u->behavior->tickMovement(*u, dt, world.map);
+        }
+    }
+}
+
+void VisionSystem::update(GameWorld& world)
+{
+    // A 阵营视野
+   
+    for (auto& u : world.unitsA) {
+        if (u->isAlive()) {
+            u->behavior->tickVision(*u, world.map, world.enemiesA);
+        }
+    }
+
+    // B 阵营视野
+    for (auto& u : world.unitsB) {
+        if (u->isAlive()) {
+            u->behavior->tickVision(*u, world.map, world.enemiesB);
+        }
+    }
+}
+
+void AttackSystem::update(GameWorld& world, float dt)
+{
+    // A 攻击
+    for (auto& u : world.unitsA) {
+        if (u->isAlive()) {
+            u->behavior->tickAttack(*u, dt, world.map);
+        }
+    }
+
+    // B 攻击
+    for (auto& u : world.unitsB) {
+        if (u->isAlive()) {
+            u->behavior->tickAttack(*u, dt, world.map);
+        }
+    }
+}
+
+void CleanupSystem::update(GameWorld& world)
+{
+    // 清理单位 A
+    world.unitsA.erase(
+        std::remove_if(world.unitsA.begin(), world.unitsA.end(),
+            [](const std::unique_ptr<Unit>& u){
+                return u->isDestroyed();
+            }),
+        world.unitsA.end()
+    );
+
+    // 清理单位 B
+    world.unitsB.erase(
+        std::remove_if(world.unitsB.begin(), world.unitsB.end(),
+            [](const std::unique_ptr<Unit>& u){
+                return u->isDestroyed();
+            }),
+        world.unitsB.end()
+    );
+}
