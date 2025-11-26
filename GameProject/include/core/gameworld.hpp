@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <condition_variable>
+#include <cassert>
 
 
 
@@ -52,7 +53,7 @@ public:
 };
 
 class VisionSystem {
-pubilc:
+public:
     VisionSystem() = default;
 
     void update(GameWorld& world);
@@ -76,10 +77,10 @@ public:
     BaseSystem() = default;
 
     void update(GameWorld& world, float dt);
-    void spawnUnit(UnitType t, Base& base, GameWorld& world);
+    void spawnUnit(UnitType t, Base& base, GameWorld& world) const;
 
 private:
-    findSpawnPos(const Base& base, const GameWorld& world) const;
+    Coord findSpawnPos(const Base& base, const GameWorld& world) const;
 };
 
 class RenderSystem {
@@ -93,16 +94,6 @@ public:
 
 class GameWorld {
 private:
-    Map map;
-    std::unique_ptr<Base> baseA;
-    std::unique_ptr<Base> baseB;
-
-    std::vector<std::unique_ptr<Unit>> unitsA;
-    std::vector<std::unique_ptr<Unit>> unitsB;
-
-    std::vector<IAttackable*> enemiesA;
-    std::vector<IAttackable*> enemiesB;
-
      // --- 系统层 ---
     MovementSystem movementSystem;
     VisionSystem   visionSystem;
@@ -120,14 +111,26 @@ private:
     std::atomic<bool>             renderRunning;
 public:
     GameWorld();
-    ~GameWorld()
+    ~GameWorld();
     
     void update();
 
     void startRenderThread();
     void stopRenderThread();
 
-    
-    bool isTileFree(const Coord& c) const;                    
 
+    const BaseSystem& getBaseSystem() const { return baseSystem; }
+    
+    bool isTileFree(const Coord& c) const;        
+    
+    
+    Map map;
+    std::unique_ptr<Base> baseA;
+    std::unique_ptr<Base> baseB;
+
+    std::vector<std::unique_ptr<Unit>> unitsA;
+    std::vector<std::unique_ptr<Unit>> unitsB;
+
+    std::vector<IAttackable*> enemiesA;
+    std::vector<IAttackable*> enemiesB;
 };

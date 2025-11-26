@@ -1,5 +1,7 @@
 #pragma once 
 #include "map.hpp"
+#include "Iattackable.hpp"
+#include <vector>
 #include <algorithm>
 #include <memory>
 
@@ -94,6 +96,11 @@ public:
     virtual ~IMovementBehavior() = default;
     virtual void setMoveTarget(const Coord& dst, const Map& map, Unit& u) = 0;
     virtual void update(Unit& u, float dt, const Map& map) = 0;
+
+    virtual std::vector<Coord>& usePath() = 0;
+    virtual Coord getLastTarget() const = 0;
+    virtual bool hasLastTarget() const = 0;
+    virtual void setLastTarget(const Coord& c) = 0;
 };
 
 class DefaultMovementBehavior : public IMovementBehavior {
@@ -106,12 +113,13 @@ private:
 public:
     void setMoveTarget(const Coord& dst, const Map& map, Unit& u) override;
     void update(Unit& u, float dt, const Map& map) override;
-    Coord getLastTarget() const { return lastTarget; }
-    bool hasLastTarget() const { return hasLast; }
-    void setLastTarget(const Coord& c) {
+    Coord getLastTarget() const override {return lastTarget; }
+    bool hasLastTarget() const override { return hasLast; }
+    void setLastTarget(const Coord& c) override {
         lastTarget = c;
         hasLast = true;
     }
+    std::vector<Coord>& usePath() { return path; }
 };
 
 /*====================================
@@ -122,7 +130,7 @@ public:
     virtual ~IAttackBehavior() = default;
     virtual void setTarget(IAttackable* t) = 0;
     virtual IAttackable* getTarget() const = 0;
-    virtual void update(Unit& u, float dt, const Map& map
+    virtual void update(Unit& u, float dt, const Map& map, 
                         const std::vector<IAttackable*>& visibleEnemies) = 0;
     virtual IAttackable* findNearest(const Unit& self,
                              const Map& map,
@@ -146,7 +154,7 @@ public:
     bool inAttackRange(const Unit& self,
                        const Map& map,
                        IAttackable* t) const;
-    IAttackable* getTarget() const override {return target};
+    IAttackable* getTarget() const override {return target; }
     void setTarget(IAttackable* t) override;
     void update(Unit& u, float dt, const Map& map,
                 const std::vector<IAttackable*>& visibleEnemies) override;
@@ -217,7 +225,7 @@ private:
 public:
     BaseState get() const override;
     void set(BaseState s) override;
-}
+};
 
 class BaseCommandBehavior {
 private:
@@ -225,29 +233,29 @@ private:
 public:
     void issueProduce(UnitType t);
     bool hasPending() const;
-    UnitType nestPending() const;
+    UnitType nextPending() const;
     void pop() ;
     void clear();
 };
 
 class PeriodicProductionBehavior {
 private:
-    floar timer = 0.f;
+    float timer = 0.f;
     float period = 3.f;
 public:
     void reset(float p);
     bool triggered(float dt);
-}
+};
 
 
 class BaseSpawnBehavior {
 private:
-    UnitType current;
+    UnitType currentType;
     float cd = 0.f;
 public:
     void begin(UnitType t, Base& self);
     bool update(Base& self, float dt, GameWorld& world);
-    Unittype type() const;
+    UnitType type() const;
 
 };
 

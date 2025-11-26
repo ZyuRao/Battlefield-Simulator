@@ -76,14 +76,14 @@ void TaskPool::shutdown() {
 
     for(auto& t : workers) {
         if(t.joinable()) {
-            t.join;
+            t.join();
         }
     }
 
     workers.clear();
 }
 
-TaskPool::submit(Job job) {
+void TaskPool::submit(Job job) {
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         jobs.push(std::move(job));
@@ -103,18 +103,18 @@ void BaseSystem::update(GameWorld& world, float dt) {
     }
 }
 
-void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) {
+void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) const{
     Coord spawnPos = findSpawnPos(base, world);
     auto u = std::make_unique<Unit>(t, spawnPos, base.getFaction());
 
     if(base.getFaction() == Faction::A) {
         world.unitsA.push_back(std::move(u));
     } else {
-        world.unitsB.pusn_back(std::move(u));
+        world.unitsB.push_back(std::move(u));
     }
 }
 
-Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) {
+Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) const {
     Coord c = base.getPos();
 
     std::vector<Coord> nbrs;
@@ -125,20 +125,20 @@ Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) {
         }
     }
 
-    if(world.map.getTile(c).isPassable() && world.isTileFree(c)) return c
+    if(world.map.getTile(c).isPassable() && world.isTileFree(c)) return c;
 }
 
 void MovementSystem::update(GameWorld& world, float dt)
 {
     // A 阵营
-    for (auto& u : world.getUnitsA()) {
+    for (auto& u : world.unitsA) {
         if (u->isAlive()) {
             u->behavior->tickMovement(*u, dt, world.map);
         }
     }
 
     // B 阵营
-    for (auto& u : world.getUnitsB()) {
+    for (auto& u : world.unitsB) {
         if (u->isAlive()) {
             u->behavior->tickMovement(*u, dt, world.map);
         }
@@ -168,14 +168,14 @@ void AttackSystem::update(GameWorld& world, float dt)
     // A 攻击
     for (auto& u : world.unitsA) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map);
+            u->behavior->tickAttack(*u, dt, world.map, world.enemiesA);
         }
     }
 
     // B 攻击
     for (auto& u : world.unitsB) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map);
+            u->behavior->tickAttack(*u, dt, world.map, world.enemiesB);
         }
     }
 }

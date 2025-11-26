@@ -1,9 +1,13 @@
 #include "behavior.hpp"
+#include "gameworld.hpp"
 #include <memory>
+
+
+class GameWorld;
 
 static float terrainSpend(Unit& u, const Tile& tile) {
     float s = u.baseStats.moveSpeed / tile.getMoveCost();
-    if(t == UnitType::Knight) {
+    if(u.type == UnitType::Knight) {
         switch(tile.getType()) {
             case TileType::PLAIN:  return s * 1.1f;
             case TileType::FOREST: return s * 0.6f;
@@ -59,7 +63,7 @@ void DefaultMovementBehavior::setMoveTarget(const Coord& dst, const Map& map, Un
 void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
     if(idx > path.size()) return;
 
-    float sp - terrainSpend(u, map.getTile(u.pos));
+    float sp = terrainSpend(u, map.getTile(u.pos));
 
     accumulator += sp * dt;
     while(accumulator >=  1.0f && idx + 1 < path.size()) {
@@ -117,7 +121,7 @@ void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
     }
 
     if(needNewTarget) {
-        taregt = findNearest(u, map, visibleEnemies);
+        target = findNearest(u, map, visibleEnemies);
         if(!target) return;
     }
 
@@ -146,8 +150,8 @@ IAttackable* DefaultAttackBehavior::findNearest(
 
     for(IAttackable* e : visibleEnemies) {
         if(!e || e->isDestroyed()) continue;
-        float d = self.pos.mhtDistanceTo(e->getPos());
-        if (e->getAttackableType() == AttackableType::Base) {
+        float d = u.pos.mhtDistanceTo(e->getPos());
+        if (e->getAttackType() == AttackableType::BASE) {
             if (d < bestBaseDist) {
                 bestBaseDist = d;
                 bestBase = e;
@@ -176,7 +180,7 @@ bool DefaultAttackBehavior::inAttackRange(
 
 UnitBehavior::UnitBehavior() {
     movement = std::make_unique<DefaultMovementBehavior>();
-    attack = std:::make_unique<DefaultAttackBehavior>();
+    attack = std::make_unique<DefaultAttackBehavior>();
     command      = std::make_unique<DefaultCommandBehavior>();
     vision       = std::make_unique<DefaultVisionBehavior>();
     stateMachine = std::make_unique<DefaultStateMachine>();
@@ -211,7 +215,7 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
     if(st == UnitState::Moving || st == UnitState::Chasing) {
         movement->update(u, dt, map);
 
-        if(path.empty()) {
+        if(movement->usePath().empty()) {
             stateMachine->set(UnitState::Idle);
         }
     }
@@ -219,7 +223,7 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
 
 void UnitBehavior::tickAttack(
     Unit& u, float dt, const Map& map,
-    const std::vector<IAttackable*>& eneimes
+    const std::vector<IAttackable*>& enemies
 ) {
     if(isDead()) return;
 
@@ -233,7 +237,7 @@ void UnitBehavior::tickAttack(
             stateMachine->set(UnitState::Attacking);
             break;
         case UnitCommandType::Stop:
-            movement->setMoveTarget(nullptr, map, u);
+            movement->usePath().clear();
             stateMachine->set(UnitState::Idle);
             break;
         default:
@@ -335,7 +339,7 @@ void BaseSpawnBehavior::begin(UnitType t, Base& self) {
     cd = self.baseProductTime;  // 从 Base 读取生产时间
 }
 
-bool BaseSpawnBehavior::update(float dt, Base& self, GameWorld& world) {
+bool BaseSpawnBehavior::update(Base& self, float dt, GameWorld& world) {
     cd -= dt;
     return cd <= 0.f;
 }
@@ -355,8 +359,8 @@ bool BaseBehavior::isDead() const {
     return stateMachine->get() == BaseState::Dead;
 }
 
-void BaseBehavior::reqSpawn(Base& self, GameWorld world, UnitType t){
-    world.baseSystem.spawnUnit(t, self, world);
+void BaseBehavior::reqSpawn(Base& self, GameWorld& world, UnitType t){
+    world.getBaseSystem().spawnUnit(t, self, world);
 }
 
 void BaseBehavior::onKilled(Base& self) {
@@ -389,10 +393,10 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
         }
 
         case BaseState::Producing: {
-            if(spawn->update(dt, self)) {
+            if(spawn->update(self, dt, world)) {
                 UnitType t = spawn->type();
                 reqSpawn(self, world, t);
-                stateMachine->set(BaseState::Idle)
+                stateMachine->set(BaseState::Idle);
             }
             break;
         }
@@ -400,4 +404,4 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
         default:
             break;
     }
-}
+};

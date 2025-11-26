@@ -7,7 +7,7 @@
 
 namespace {
     constexpr int MAP_WIDTH = 60;
-    constexpr inr MAP_HEIGHT = 40;
+    constexpr int MAP_HEIGHT = 40;
 
     // 在一个矩形区域内寻找第一个可通行格子
     bool findPassableInRegion(const Map& map,
@@ -65,7 +65,8 @@ namespace {
 
 GameWorld::GameWorld()
     : map(MAP_HEIGHT, MAP_HEIGHT)
-    , renderRunning(false)
+    , renderRunning(false), movementSystem(), visionSystem(), attackSystem()
+    , cleanupSystem(), baseSystem(), timeManager()
 {
     MapGenerator gen(MAP_WIDTH, MAP_HEIGHT);
 
@@ -97,5 +98,25 @@ GameWorld::~GameWorld() {
 
 void GameWorld::update() {
     timeManager.tick();
+    float dt = timeManager.getDeltaTime();
+
+    baseSystem.update(*this, dt);
+    visionSystem.update(*this);
+
+    movementSystem.update(*this, dt);
+
+    attackSystem.update(*this, dt);
+    cleanupSystem.update(*this);
+}
+
+bool GameWorld::isTileFree(const Coord& c) const {
+    for(auto& u : unitsA) {
+        if(u->isAlive() && u->getPos() == c) return false;
+
+    }
+
+    for(auto& u : unitsB) {
+        if(u->isAlive() && u->getPos() == c) return false;
+    }
 }
 

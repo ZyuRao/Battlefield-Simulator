@@ -64,11 +64,12 @@ private:
     float maxHp = 500;
     float hp;
 
-    float baseProductTime = 3.f;
 
     std::unique_ptr<BaseBehavior> behavior;
 
 public:
+    float baseProductTime = 3.f;
+
     Base(const Coord& p, Faction f) : pos(p), faction(f) {
         behavior = std::make_unique<BaseBehavior>();
     }
@@ -79,10 +80,10 @@ public:
 
 
     Coord getPos() const override { return pos; }
-    AttackableType getAttackableType() const override {
-        return AttackableType::Base;
+    AttackableType getAttackType() const override {
+        return AttackableType::BASE;
     }
-    Faction getFaction() const { returm faction}
+    Faction getFaction() const { return faction; }
 
     std::string getSymbol() const {
         return faction == Faction::A ? "A" : "B";
@@ -153,7 +154,4 @@ public:
         return "?";
     }
     
-    void update(float dt, const Map& map, const std::vector<IAttackable*>& enemies) {
-        behavior->update(*this, dt, map, enemies);
-    }
 };
