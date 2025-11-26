@@ -1,5 +1,5 @@
-#include "Iattackable.hpp"
-#include "gameworld.hpp"
+#include "core/Iattackable.hpp"
+#include "core/gameworld.hpp"
 #include <chrono>
 #include <algorithm>
 #include <iostream>
@@ -65,8 +65,7 @@ namespace {
 
 GameWorld::GameWorld()
     : map(MAP_HEIGHT, MAP_HEIGHT)
-    , renderRunning(false), movementSystem(), visionSystem(), attackSystem()
-    , cleanupSystem(), baseSystem(), timeManager()
+    , renderRunning(false), taskPool(4)
 {
     MapGenerator gen(MAP_WIDTH, MAP_HEIGHT);
 
@@ -88,6 +87,7 @@ GameWorld::GameWorld()
     enemiesA.clear();
     enemiesB.clear();
 
+    taskPool.init(this);
     renderSystem = std::make_unique<RenderSystem>();
 }
 
@@ -97,10 +97,13 @@ GameWorld::~GameWorld() {
 }
 
 void GameWorld::update() {
+    std::unique_lock lock(worldMutex);
+
     timeManager.tick();
     float dt = timeManager.getDeltaTime();
 
     baseSystem.update(*this, dt);
+    rebuildEnemies();
     visionSystem.update(*this);
 
     movementSystem.update(*this, dt);
@@ -117,6 +120,57 @@ bool GameWorld::isTileFree(const Coord& c) const {
 
     for(auto& u : unitsB) {
         if(u->isAlive() && u->getPos() == c) return false;
+    }
+
+    if (baseA && !baseA->isDestroyed() && baseA->getPos() == c)
+        return false;
+    if (baseB && !baseB->isDestroyed() && baseB->getPos() == c)
+        return false;
+
+    return true;
+}
+
+void GameWorld::startRenderThread() {
+    if(renderRunning.load()) return;
+
+    renderRunning.store(true);
+
+    renderThread = std::thread([this]() {
+        while(renderRunning.load()) {
+            {
+                std::shared_lock lock(worldMutex);
+                renderSystem->render(*this);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        }
+    });
+}
+
+void GameWorld::stopRenderThread() {
+    if(!renderRunning.load()) return;
+
+    renderRunning.store(false);
+    if(renderThread.joinable()) {
+        renderThread.join();
+    }
+}
+
+void GameWorld::rebuildEnemies() {
+    enemiesA.clear();
+    enemiesB.clear();
+
+    if (baseB) {
+        enemiesA.push_back(baseB.get());  
+    }
+    for (auto& u : unitsB) {
+        enemiesA.push_back(u.get());      
+    }
+
+    if (baseA) {
+        enemiesB.push_back(baseA.get());
+    }
+    for (auto& u : unitsA) {
+        enemiesB.push_back(u.get());
     }
 }
 

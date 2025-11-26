@@ -1,5 +1,8 @@
-#include "behavior.hpp"
-#include "gameworld.hpp"
+#include "core/behavior.hpp"
+#include "core/gameworld.hpp"
+#include "core/Iattackable.hpp"
+#include "core/map.hpp"
+#include "utils/vec2.hpp"
 #include <memory>
 
 
@@ -252,10 +255,11 @@ void UnitBehavior::tickAttack(
     UnitState st = stateMachine->get();
 
     switch(st) {
-        case UnitState::Idle:
+        case UnitState::Idle: {
             attack->update(u, dt, map, visible);
             break;
-        case UnitState::Attacking:
+        }     
+        case UnitState::Attacking: {
             attack->update(u, dt, map, visible);
             IAttackable* t = attack->getTarget();
             if(!t || t->isDestroyed()) {
@@ -268,7 +272,8 @@ void UnitBehavior::tickAttack(
                 movement->setMoveTarget(t->getPos(), map, u);
             }
             break;
-        case UnitState::Chasing:
+        }
+        case UnitState::Chasing: {
             IAttackable* t = attack->getTarget();
 
             if (!t || t->isDestroyed()) {
@@ -289,6 +294,7 @@ void UnitBehavior::tickAttack(
                 movement->setLastTarget(curTargetPos);
             }
             break;
+        }       
         default:
             break;
     }
@@ -342,6 +348,10 @@ void BaseSpawnBehavior::begin(UnitType t, Base& self) {
 bool BaseSpawnBehavior::update(Base& self, float dt, GameWorld& world) {
     cd -= dt;
     return cd <= 0.f;
+}
+
+UnitType BaseSpawnBehavior::type() const {
+    return currentType;
 }
 
 BaseBehavior::BaseBehavior() {
@@ -405,3 +415,47 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
             break;
     }
 };
+
+
+Base::Base(const Coord& p, Faction f) : pos(p), faction(f) {
+        behavior = std::make_unique<BaseBehavior>();
+    }
+
+void Base::update(float dt, GameWorld& world){
+    behavior->update(*this, dt, world);
+}
+
+void Base::takeDamage(float dmg) {
+    hp -= dmg;
+    if(hp <= 0 && !behavior->isDead()){
+        hp = 0;
+        behavior->onKilled(*this);
+    }
+}
+bool Base::isDestroyed() const {
+    return behavior->isDead();
+};
+
+Unit::Unit(UnitType t, const Coord& start, Faction faction)
+        : pos(start), type(t), owner(faction)
+{
+    baseStats = UnitStats::getStats(t);
+    hp = baseStats.maxHP;
+
+    behavior = std::make_unique<UnitBehavior>();
+}
+
+void Unit::takeDamage(float dmg){
+    float actual = std::max(0.f, dmg - baseStats.armor);
+    hp -= actual;
+    if (hp <= 0.f && !behavior->isDead()) {
+        hp = 0.f;
+        behavior->onKilled(*this);
+    }
+}
+
+bool Unit::isDestroyed() const {
+    return behavior->isDead();
+}
+
+bool Unit::isAlive() const { return !behavior->isDead(); }

@@ -1,15 +1,18 @@
 #pragma once 
-#include "map.hpp"
-#include "Iattackable.hpp"
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <queue>
+#include "utils/vec2.hpp"
 
 
 // 前置声明
+class IAttackable;
+class Map;
 class Unit;
 class Base;
 class GameWorld;
+enum class UnitType;
 
 /*====================================
     Enum: UnitState / CommandType
@@ -134,11 +137,11 @@ public:
                         const std::vector<IAttackable*>& visibleEnemies) = 0;
     virtual IAttackable* findNearest(const Unit& self,
                              const Map& map,
-                             const std::vector<IAttackable*>& visibleEnemies) const;
+                             const std::vector<IAttackable*>& visibleEnemies) const = 0;
 
     virtual bool inAttackRange(const Unit& self,
                        const Map& map,
-                       IAttackable* t) const;
+                       IAttackable* t) const = 0;
 };
 
 class DefaultAttackBehavior : public IAttackBehavior {

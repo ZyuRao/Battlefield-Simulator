@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <condition_variable>
+#include <shared_mutex>
 #include <cassert>
 
 
@@ -27,21 +28,26 @@ public:
 
 class TaskPool {
 public:
-    using Job = std::function<void()>;
+    using Job = std::function<void(GameWorld&)>;
 private:
+    GameWorld* worldPtr = nullptr;
     std::vector<std::thread> workers;
     std::queue<Job>          jobs;
     std::mutex               queueMutex;
     std::condition_variable  cv;
     std::atomic<bool>        stopping;
 
+    void workerLoop();
+
 public:
-    explicit TaskPool(std::size_t threadCount = 0);
+    TaskPool();
+    TaskPool(std::size_t threadCount = 0);
     ~TaskPool();
 
     void submit(Job job);
 
     void shutdown();
+    void init(GameWorld* world);
 };
 
 class MovementSystem {
@@ -94,6 +100,15 @@ public:
 
 class GameWorld {
 private:
+    Map map;
+    std::unique_ptr<Base> baseA;
+    std::unique_ptr<Base> baseB;
+
+    std::vector<std::unique_ptr<Unit>> unitsA;
+    std::vector<std::unique_ptr<Unit>> unitsB;
+
+    std::vector<IAttackable*> enemiesA;
+    std::vector<IAttackable*> enemiesB;
      // --- 系统层 ---
     MovementSystem movementSystem;
     VisionSystem   visionSystem;
@@ -109,6 +124,8 @@ private:
     std::unique_ptr<RenderSystem> renderSystem;
     std::thread                   renderThread;
     std::atomic<bool>             renderRunning;
+
+    mutable std::shared_mutex worldMutex;
 public:
     GameWorld();
     ~GameWorld();
@@ -121,16 +138,18 @@ public:
 
     const BaseSystem& getBaseSystem() const { return baseSystem; }
     
-    bool isTileFree(const Coord& c) const;        
+    bool isTileFree(const Coord& c) const; 
     
+    void rebuildEnemies();
+
+
+    friend class TaskPool;
+    friend class MovementSystem;
+    friend class VisionSystem;
+    friend class AttackSystem;
+    friend class CleanupSystem;
+    friend class BaseSystem;
+    friend class RenderSystem;
+    friend class Game;
     
-    Map map;
-    std::unique_ptr<Base> baseA;
-    std::unique_ptr<Base> baseB;
-
-    std::vector<std::unique_ptr<Unit>> unitsA;
-    std::vector<std::unique_ptr<Unit>> unitsB;
-
-    std::vector<IAttackable*> enemiesA;
-    std::vector<IAttackable*> enemiesB;
 };

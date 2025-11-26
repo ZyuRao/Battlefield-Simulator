@@ -1,4 +1,6 @@
-#include "gameworld.hpp"
+#include "core/gameworld.hpp"
+#include <iostream>
+#include <string>
 
 TimeManager::TimeManager()
     : deltatime(0.f), initialized(false) {}
@@ -29,37 +31,25 @@ void TimeManager::tick() {
 static std::size_t decideThreadCount(std::size_t requested) {
     if(requested > 0) return requested;
     std::size_t hc = std::thread::hardware_concurrency();
-    if(hc == 0) hc = 4;
-    return hc;
+    return (hc == 0 ? 4 : hc);
+}
+
+
+TaskPool::TaskPool() : stopping(false) {}
+
+void TaskPool::init(GameWorld* world) {
+    worldPtr = world;
+
+    std::size_t tc = decideThreadCount(workers.size());
+    for(std::size_t i = 0; i < tc; i++) {
+        workers.emplace_back(&TaskPool::workerLoop, this);
+    }
 }
 
 TaskPool::TaskPool(std::size_t threadCount)
     : stopping(false)
 {
-    threadCount = decideThreadCount(threadCount);
-
-    for(std::size_t i = 0; i < threadCount; i++){
-        workers.emplace_back([this]() {
-            while(true) {
-                Job job;
-
-                {
-                    std::unique_lock<std::mutex> lock(queueMutex);
-
-                    cv.wait(lock, [&]() {
-                        return stopping || !jobs.empty();
-                    });
-
-                    if(stopping && jobs.empty()) return;
-
-                    job = std::move(jobs.front());
-                    jobs.pop();
-                }
-
-                job();
-            }
-        });
-    }
+    workers.reserve(decideThreadCount(threadCount));
 }
 
 TaskPool::~TaskPool() {
@@ -90,6 +80,30 @@ void TaskPool::submit(Job job) {
     }
 
     cv.notify_one();
+}
+
+void TaskPool::workerLoop() {
+    while(true) {
+        Job job;
+
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+
+            cv.wait(lock, [&]() {
+                return stopping || !jobs.empty();
+            });
+
+            if(stopping && jobs.empty()) return;
+
+            job = std::move(jobs.front());
+            jobs.pop();
+        }
+
+        {
+            std::shared_lock<std::shared_mutex> lock(worldPtr->worldMutex);
+            job(*worldPtr);
+        }
+    }
 }
 
 
@@ -199,4 +213,43 @@ void CleanupSystem::update(GameWorld& world)
             }),
         world.unitsB.end()
     );
+}
+
+
+void RenderSystem::render(const GameWorld& world) {
+    const int W = world.map.getWidth();
+    const int H = world.map.getHeight();
+
+    std::vector<std::string> buffer(H, std::string(W, ' '));
+
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            auto sym = world.map.getTile({x,y}).getSymbol();
+            buffer[y][x] = sym.empty() ? ' ' : sym[0];
+        }
+
+    // 绘制基地
+    if (world.baseA && !world.baseA->isDestroyed())
+        buffer[world.baseA->getPos().y][world.baseA->getPos().x] = 'A';
+
+    if (world.baseB && !world.baseB->isDestroyed())
+        buffer[world.baseB->getPos().y][world.baseB->getPos().x] = 'B';
+
+    // 绘制单位 A/B
+    for (auto& u : world.unitsA)
+        if (u->isAlive()) {
+            auto p = u->getPos();
+            buffer[p.y][p.x] = u->getSymbol()[0];
+        }
+
+    for (auto& u : world.unitsB)
+        if (u->isAlive()) {
+            auto p = u->getPos();
+            buffer[p.y][p.x] = u->getSymbol()[0];
+        }
+
+    // 清屏并打印
+    std::cout << "\x1b[2J\x1b[H";
+    for (auto& line : buffer)
+        std::cout << line << "\n";
 }

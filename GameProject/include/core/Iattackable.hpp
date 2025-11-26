@@ -1,11 +1,14 @@
 # pragma once
 #include <vector>
 #include <string>
+#include <memory>
 #include "utils/vec2.hpp"
-#include "map.hpp"
-#include "behavior.hpp"
 
-class GameWorld;
+class BaseBehavior;
+class UnitBehavior;
+class GameWorld;  
+class Map;
+
 
 enum class UnitType {
     Infantry, //步兵：中等移动、中等血量、近战
@@ -70,13 +73,8 @@ private:
 public:
     float baseProductTime = 3.f;
 
-    Base(const Coord& p, Faction f) : pos(p), faction(f) {
-        behavior = std::make_unique<BaseBehavior>();
-    }
-
-    void update(float dt, GameWorld& world){
-        behavior->update(*this, dt, world);
-    }
+    Base(const Coord& p, Faction f);
+    void update(float dt, GameWorld& world);
 
 
     Coord getPos() const override { return pos; }
@@ -89,16 +87,8 @@ public:
         return faction == Faction::A ? "A" : "B";
     }
 
-    void takeDamage(float dmg) override {
-        hp -= dmg;
-        if(hp <= 0 && !behavior->isDead()){
-            hp = 0;
-            behavior->onKilled(*this);
-        }
-    }
-    bool isDestroyed() const override {
-        return behavior->isDead();
-    };
+    void takeDamage(float dmg) override;
+    bool isDestroyed() const override;
 };
 
 class Unit : public IAttackable {
@@ -114,14 +104,7 @@ public:
     //行为策略组合
 
 public:
-   Unit(UnitType t, const Coord& start, Faction faction)
-        : pos(start), type(t), owner(faction)
-    {
-        baseStats = UnitStats::getStats(t);
-        hp = baseStats.maxHP;
-
-        behavior = std::make_unique<UnitBehavior>();
-    }
+    Unit(UnitType t, const Coord& start, Faction faction);
 
     Coord getPos() const override { return pos; }
 
@@ -130,20 +113,11 @@ public:
     }
 
     Faction getFaction() const { return owner; }
-    void takeDamage(float dmg) override {
-        float actual = std::max(0.f, dmg - baseStats.armor);
-        hp -= actual;
-        if (hp <= 0.f && !behavior->isDead()) {
-            hp = 0.f;
-            behavior->onKilled(*this);
-        }
-    }
+    void takeDamage(float dmg) override;
 
-    bool isDestroyed() const override {
-        return behavior->isDead();
-    }
+    bool isDestroyed() const override;
 
-    bool isAlive() const { return !behavior->isDead(); }
+    bool isAlive() const;
 
     std::string getSymbol() const {
         switch (type) {
