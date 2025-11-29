@@ -8,6 +8,26 @@
 
 class GameWorld;
 
+namespace {
+    Coord pickRandomWanderTarget(const Unit& u, const Map& map, std::mt19937& rng){
+        std::uniform_int_distribution<int> dx(-5, 5);
+        std::uniform_int_distribution<int> dy(-5, 5);
+
+        Coord start = u.getPos();
+
+        for(int tries = 0; tries < 20; tries++) {
+            Coord cand{start.x + dx(rng), start.y + dy(rng)};
+            if(!map.inBounds(cand)) continue;
+
+            if(!map.getTile(cand).isPassable()) continue;
+
+            if(map.isReachable(start, cand)) return cand;
+        }
+
+        return start;
+    }
+}
+
 static float terrainSpend(Unit& u, const Tile& tile) {
     float s = u.baseStats.moveSpeed / tile.getMoveCost();
     if(u.type == UnitType::Knight) {
@@ -64,17 +84,18 @@ void DefaultMovementBehavior::setMoveTarget(const Coord& dst, const Map& map, Un
 }
 
 void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
-    if(idx > path.size()) return;
+    if(path.empty()) return;
+    if(idx >= path.size()) return;
 
     float sp = terrainSpend(u, map.getTile(u.pos));
 
     accumulator += sp * dt;
-    while(accumulator >=  1.0f && idx + 1 < path.size()) {
+    while(accumulator >=  1.0f && idx < path.size()) {
         accumulator -= 1.f;
         u.pos = path[++idx];
     }
 
-    if (idx >= path.size()) {
+    if (idx + 1 >= path.size()) {
         // 路径走完后留给上层（UnitBehavior）去把状态改成 Idle
         path.clear();
     }
@@ -182,6 +203,8 @@ bool DefaultAttackBehavior::inAttackRange(
 }
 
 UnitBehavior::UnitBehavior() {
+    std::random_device rd;
+    rng.seed(rd());
     movement = std::make_unique<DefaultMovementBehavior>();
     attack = std::make_unique<DefaultAttackBehavior>();
     command      = std::make_unique<DefaultCommandBehavior>();
@@ -215,7 +238,7 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
 
     UnitState st = stateMachine->get();
 
-    if(st == UnitState::Moving || st == UnitState::Chasing) {
+    if(st == UnitState::Moving || st == UnitState::Chasing || st == UnitState::Wandering) {
         movement->update(u, dt, map);
 
         if(movement->usePath().empty()) {
@@ -257,6 +280,18 @@ void UnitBehavior::tickAttack(
     switch(st) {
         case UnitState::Idle: {
             attack->update(u, dt, map, visible);
+            if(attack->getTarget()) {
+                stateMachine->set(UnitState::Attacking);
+                break;
+            }
+            idleAccum += dt;
+            if(idleAccum >= 0.5f) {
+                idleAccum = 0.0f;
+
+                Coord dst = pickRandomWanderTarget(u, map, rng);
+                movement->setMoveTarget(dst, map, u);
+                stateMachine->set(UnitState::Wandering);
+            }
             break;
         }     
         case UnitState::Attacking: {
@@ -267,7 +302,7 @@ void UnitBehavior::tickAttack(
                 break;
             }
 
-            if(attack->inAttackRange(u, map, t)) {
+            if(!attack->inAttackRange(u, map, t)) {
                 stateMachine->set(UnitState::Chasing);
                 movement->setMoveTarget(t->getPos(), map, u);
             }
@@ -294,7 +329,15 @@ void UnitBehavior::tickAttack(
                 movement->setLastTarget(curTargetPos);
             }
             break;
-        }       
+        }  
+        case UnitState::Wandering: {
+            attack->update(u, dt, map, visible);
+            if(attack->getTarget()) {
+                stateMachine->set(UnitState::Attacking);
+            }
+
+            break;
+        }     
         default:
             break;
     }
@@ -327,6 +370,7 @@ void BaseCommandBehavior::clear() {
 void PeriodicProductionBehavior::reset(float p) {
     period = p;
     timer = 0.f;
+    idx = 0;
 }
 
 bool PeriodicProductionBehavior::triggered(float dt) {
@@ -338,7 +382,11 @@ bool PeriodicProductionBehavior::triggered(float dt) {
     return false;
 }
 
-
+UnitType PeriodicProductionBehavior::nextType() {
+    UnitType t = cycle[idx];
+    idx = (idx + 1) % cycle.size();
+    return t;
+}
 
 void BaseSpawnBehavior::begin(UnitType t, Base& self) {
     currentType = t;
@@ -395,8 +443,8 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
             }
             
             if(periodic->triggered(dt)) {
-                UnitType defaultUnit = UnitType::Infantry;
-                spawn->begin(defaultUnit, self);
+                UnitType t = periodic->nextType();
+                spawn->begin(t, self);
                 stateMachine->set(BaseState::Producing);
             }
             break;

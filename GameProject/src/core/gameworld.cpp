@@ -141,7 +141,7 @@ void GameWorld::startRenderThread() {
                 std::shared_lock lock(worldMutex);
                 renderSystem->render(*this);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
 }

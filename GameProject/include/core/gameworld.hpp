@@ -96,6 +96,9 @@ public:
 
     void render(const GameWorld& world);
     //for ASCII
+
+private:
+    std::vector<std::string> lastBuffer;
 };
 
 class GameWorld {

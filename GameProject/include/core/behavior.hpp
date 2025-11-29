@@ -1,9 +1,12 @@
 #pragma once 
 #include <vector>
 #include <algorithm>
+#include <random>
 #include <memory>
 #include <queue>
+#include <array>
 #include "utils/vec2.hpp"
+#include "Iattackable.hpp"
 
 
 // 前置声明
@@ -22,6 +25,7 @@ enum class UnitState {
     Moving,
     Attacking,
     Chasing,
+    Wandering,
     Dead
 };
 
@@ -190,6 +194,8 @@ public:
 =====================================*/
 class UnitBehavior {
 private:
+    float idleAccum = 0.0f;
+    std::mt19937 rng;
     std::unique_ptr<IMovementBehavior> movement;
     std::unique_ptr<IAttackBehavior> attack;
     std::unique_ptr<ICommandBehavior> command;
@@ -245,9 +251,18 @@ class PeriodicProductionBehavior {
 private:
     float timer = 0.f;
     float period = 3.f;
+
+    std::array<UnitType, 3> cycle {
+        UnitType::Infantry,
+        UnitType::Archer,
+        UnitType::Knight
+    };
+    std::size_t idx = 0;
 public:
     void reset(float p);
     bool triggered(float dt);
+
+    UnitType nextType();
 };
 
 

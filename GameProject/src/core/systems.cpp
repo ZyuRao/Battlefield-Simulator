@@ -1,6 +1,28 @@
 #include "core/gameworld.hpp"
 #include <iostream>
 #include <string>
+#include <windows.h>
+namespace {
+    void clearScreen() {
+        #ifdef _WIN32
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (hOut == INVALID_HANDLE_VALUE) return;
+
+            CONSOLE_SCREEN_BUFFER_INFO csbi;
+            if (!GetConsoleScreenBufferInfo(hOut, &csbi)) return;
+
+            DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
+            DWORD count;
+            COORD home = {0, 0};
+
+            FillConsoleOutputCharacter(hOut, ' ', cellCount, home, &count);
+            FillConsoleOutputAttribute(hOut, csbi.wAttributes, cellCount, home, &count);
+            SetConsoleCursorPosition(hOut, home);
+        #else
+            std::cout << "\x1b[2J\x1b[H";
+        #endif
+    }
+}
 
 TimeManager::TimeManager()
     : deltatime(0.f), initialized(false) {}
@@ -215,27 +237,31 @@ void CleanupSystem::update(GameWorld& world)
     );
 }
 
+static void moveCursor(int row, int col) {
+    std::cout << "\x1b[" << row << ";" << col << "H";
+}
 
 void RenderSystem::render(const GameWorld& world) {
     const int W = world.map.getWidth();
     const int H = world.map.getHeight();
 
+    
     std::vector<std::string> buffer(H, std::string(W, ' '));
 
-    for (int y = 0; y < H; ++y)
+    // 1. 生成本帧 buffer
+    for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             auto sym = world.map.getTile({x,y}).getSymbol();
             buffer[y][x] = sym.empty() ? ' ' : sym[0];
         }
+    }
 
-    // 绘制基地
     if (world.baseA && !world.baseA->isDestroyed())
         buffer[world.baseA->getPos().y][world.baseA->getPos().x] = 'A';
 
     if (world.baseB && !world.baseB->isDestroyed())
         buffer[world.baseB->getPos().y][world.baseB->getPos().x] = 'B';
 
-    // 绘制单位 A/B
     for (auto& u : world.unitsA)
         if (u->isAlive()) {
             auto p = u->getPos();
@@ -248,8 +274,25 @@ void RenderSystem::render(const GameWorld& world) {
             buffer[p.y][p.x] = u->getSymbol()[0];
         }
 
-    // 清屏并打印
-    std::cout << "\x1b[2J\x1b[H";
-    for (auto& line : buffer)
-        std::cout << line << "\n";
+    // 2. 如果是第一次渲染/尺寸变化 → 简单粗暴清屏全画一次
+    if (lastBuffer.size() != buffer.size()) {
+        clearScreen();
+        for (int y = 0; y < H; ++y) {
+            std::cout << buffer[y] << "\n";
+        }
+        lastBuffer = buffer;
+        std::cout.flush();
+        return;
+    }
+
+    // 3. 之后只重画“变了的那几行”
+    for (int y = 0; y < H; ++y) {
+        if (buffer[y] != lastBuffer[y]) {
+            moveCursor(y + 1, 1);      // 行号从 1 开始
+            std::cout << buffer[y];
+        }
+    }
+
+    lastBuffer = buffer;
+    std::cout.flush();
 }
