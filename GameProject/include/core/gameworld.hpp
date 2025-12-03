@@ -80,12 +80,14 @@ public:
 
 class BaseSystem {
 public:
-    BaseSystem() = default;
+    BaseSystem();
 
     void update(GameWorld& world, float dt);
     void spawnUnit(UnitType t, Base& base, GameWorld& world) const;
 
 private:
+
+    mutable std::mt19937 rng;
     Coord findSpawnPos(const Base& base, const GameWorld& world) const;
 };
 
@@ -104,14 +106,14 @@ private:
 class GameWorld {
 private:
     Map map;
-    std::unique_ptr<Base> baseA;
-    std::unique_ptr<Base> baseB;
+    std::shared_ptr<Base> baseA;
+    std::shared_ptr<Base> baseB;
 
-    std::vector<std::unique_ptr<Unit>> unitsA;
-    std::vector<std::unique_ptr<Unit>> unitsB;
+    std::vector<std::shared_ptr<Unit>> unitsA;
+    std::vector<std::shared_ptr<Unit>> unitsB;
 
-    std::vector<IAttackable*> enemiesA;
-    std::vector<IAttackable*> enemiesB;
+    std::vector<std::weak_ptr<IAttackable>> enemiesA;
+    std::vector<std::weak_ptr<IAttackable>> enemiesB;
      // --- 系统层 ---
     MovementSystem movementSystem;
     VisionSystem   visionSystem;
@@ -126,9 +128,20 @@ private:
     // --- 渲染相关（暂时只做接口占位） ---
     std::unique_ptr<RenderSystem> renderSystem;
     std::thread                   renderThread;
-    std::atomic<bool>             renderRunning;
+    std::atomic<bool>             renderRunning{false};
 
     mutable std::shared_mutex worldMutex;
+
+    
+    friend class TaskPool;
+    friend class MovementSystem;
+    friend class VisionSystem;
+    friend class AttackSystem;
+    friend class CleanupSystem;
+    friend class BaseSystem;
+    friend class RenderSystem;
+    friend class Game;
+
 public:
     GameWorld();
     ~GameWorld();
@@ -146,13 +159,5 @@ public:
     void rebuildEnemies();
 
 
-    friend class TaskPool;
-    friend class MovementSystem;
-    friend class VisionSystem;
-    friend class AttackSystem;
-    friend class CleanupSystem;
-    friend class BaseSystem;
-    friend class RenderSystem;
-    friend class Game;
     
 };

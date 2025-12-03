@@ -6,8 +6,8 @@
 
 
 namespace {
-    constexpr int MAP_WIDTH = 60;
-    constexpr int MAP_HEIGHT = 40;
+    constexpr int MAP_WIDTH = 40;
+    constexpr int MAP_HEIGHT = 10;
 
     // 在一个矩形区域内寻找第一个可通行格子
     bool findPassableInRegion(const Map& map,
@@ -64,7 +64,7 @@ namespace {
 } 
 
 GameWorld::GameWorld()
-    : map(MAP_HEIGHT, MAP_HEIGHT)
+    : map(MAP_HEIGHT, MAP_HEIGHT), baseSystem()
     , renderRunning(false), taskPool(4)
 {
     MapGenerator gen(MAP_WIDTH, MAP_HEIGHT);
@@ -81,12 +81,13 @@ GameWorld::GameWorld()
             ok = true;
         }
     }
-    baseA = std::make_unique<Base>(baseAPos, Faction::A);
-    baseB = std::make_unique<Base>(baseBPos, Faction::B);
+    baseA = std::make_shared<Base>(baseAPos, Faction::A);
+    baseB = std::make_shared<Base>(baseBPos, Faction::B);
 
     enemiesA.clear();
     enemiesB.clear();
 
+    
     taskPool.init(this);
     renderSystem = std::make_unique<RenderSystem>();
 }
@@ -97,20 +98,32 @@ GameWorld::~GameWorld() {
 }
 
 void GameWorld::update() {
-    std::unique_lock lock(worldMutex);
+    static int tick = 0;
+    ++tick;
+    // std::cout << "\n[World] Tick " << tick << "\n";
 
+    std::unique_lock<std::shared_mutex> lock(worldMutex);
     timeManager.tick();
     float dt = timeManager.getDeltaTime();
+    // std::cout << "  dt=" << dt << "\n";
 
+    // std::cout << "  BaseSystem...\n";
     baseSystem.update(*this, dt);
     rebuildEnemies();
+
+    // std::cout << "  VisionSystem...\n";
     visionSystem.update(*this);
 
+    // std::cout << "  MovementSystem...\n";
     movementSystem.update(*this, dt);
 
+    // std::cout << "  AttackSystem...\n";
     attackSystem.update(*this, dt);
+
+    // std::cout << "  CleanupSystem...\n";
     cleanupSystem.update(*this);
 }
+
 
 bool GameWorld::isTileFree(const Coord& c) const {
     for(auto& u : unitsA) {
@@ -134,14 +147,15 @@ void GameWorld::startRenderThread() {
     if(renderRunning.load()) return;
 
     renderRunning.store(true);
+    if(!renderSystem) renderSystem = std::make_unique<RenderSystem>();
 
     renderThread = std::thread([this]() {
         while(renderRunning.load()) {
             {
-                std::shared_lock lock(worldMutex);
+                std::shared_lock<std::shared_mutex> lock(worldMutex);
                 renderSystem->render(*this);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
         }
     });
 }
@@ -160,17 +174,17 @@ void GameWorld::rebuildEnemies() {
     enemiesB.clear();
 
     if (baseB) {
-        enemiesA.push_back(baseB.get());  
+        enemiesA.emplace_back(baseB);  
     }
     for (auto& u : unitsB) {
-        enemiesA.push_back(u.get());      
+        enemiesA.emplace_back(u);      
     }
 
     if (baseA) {
-        enemiesB.push_back(baseA.get());
+        enemiesB.emplace_back(baseA);
     }
     for (auto& u : unitsA) {
-        enemiesB.push_back(u.get());
+        enemiesB.emplace_back(u);
     }
 }
 

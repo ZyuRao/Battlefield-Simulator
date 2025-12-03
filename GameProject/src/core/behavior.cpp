@@ -50,7 +50,7 @@ void DefaultCommandBehavior::issueMove(const Coord& dst) {
     moveTarget = dst;
 }
 
-void DefaultCommandBehavior::issueAttack(IAttackable* t) {
+void DefaultCommandBehavior::issueAttack(const std::shared_ptr<IAttackable>& t) {
     pending = UnitCommandType::AttackUnit;
     attackTarget = t;
 }
@@ -67,13 +67,13 @@ Coord DefaultCommandBehavior::pendingMoveTarget() const {
     return moveTarget;
 }
 
-IAttackable* DefaultCommandBehavior::pendingAttackTarget() const {
+std::weak_ptr<IAttackable> DefaultCommandBehavior::pendingAttackTarget() const {
     return attackTarget;
 }
 
 void DefaultCommandBehavior::clear() {
     pending = UnitCommandType::None;
-    attackTarget = nullptr;
+    attackTarget.reset();
 }
 
 void DefaultMovementBehavior::setMoveTarget(const Coord& dst, const Map& map, Unit& u){
@@ -90,7 +90,7 @@ void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
     float sp = terrainSpend(u, map.getTile(u.pos));
 
     accumulator += sp * dt;
-    while(accumulator >=  1.0f && idx < path.size()) {
+    while(accumulator >=  1.0f && idx + 1 < path.size()) {
         accumulator -= 1.f;
         u.pos = path[++idx];
     }
@@ -102,15 +102,21 @@ void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
 }
 
 void DefaultVisionBehavior::updateVisible(Unit& self, const Map& map,
-                                          const std::vector<IAttackable*>& allEnemies)
+                                          const std::vector<std::weak_ptr<IAttackable>>& allEnemies)
 {
     visible.clear();
 
+    if(!map.inBounds(self.pos)) return;
     const Tile& t = map.getTile(self.pos);
     float effVision = self.baseStats.visionRange + t.getVisionBonus();
 
-    for(IAttackable* e : allEnemies) {
+    for(const auto& w : allEnemies) {
+        auto e = w.lock();
         if(!e || e-> isDestroyed()) continue;
+
+        Coord p = e->getPos();
+        if (!map.inBounds(p)) continue;
+
         float d = self.pos.mhtDistanceTo(e->getPos());
         if(d <= effVision) {
             visible.push_back(e);
@@ -118,26 +124,25 @@ void DefaultVisionBehavior::updateVisible(Unit& self, const Map& map,
     }
 }
 
-const std::vector<IAttackable*>& DefaultVisionBehavior::getVisible() const {
+const std::vector<std::shared_ptr<IAttackable>>& DefaultVisionBehavior::getVisible() const {
     return visible;
 }
 
 void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
-        const std::vector<IAttackable*>& visibleEnemies) {
+        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) {
     if(cd > 0) cd -= dt;
 
+    std::shared_ptr<IAttackable> cur = target.lock();
     bool needNewTarget = false;
 
-    if (!target || target->isDestroyed()) {
+    if (!cur) {
+        needNewTarget = true;
+    } else if (cur->isDestroyed()) {
         needNewTarget = true;
     } else {
-        // 检查 target 是否依然在可见列表中（离开视野也算丢失）
         bool stillVisible = false;
-        for (IAttackable* e : visibleEnemies) {
-            if (e == target) { 
-                stillVisible = true; 
-                break; 
-            }
+        for (const auto& e : visibleEnemies) {
+            if (e == cur) { stillVisible = true; break; }
         }
         if (!stillVisible) {
             needNewTarget = true;
@@ -145,34 +150,38 @@ void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
     }
 
     if(needNewTarget) {
-        target = findNearest(u, map, visibleEnemies);
-        if(!target) return;
+        cur = findNearest(u, map, visibleEnemies);
+        if(!cur) {
+            target.reset();
+            return;
+        }
+        target = cur;
     }
 
-    if(inAttackRange(u, map, target)) {
+    if(inAttackRange(u, map, cur)) {
         if(cd <= 0.f) {
             float dmg = u.baseStats.attack + map.getTile(u.pos).getAttackBonus();
-            target->takeDamage(dmg);
+            cur->takeDamage(dmg);
             cd = 0.8f;
         }
     }
 }
 
-void DefaultAttackBehavior::setTarget(IAttackable* t) {
+void DefaultAttackBehavior::setTarget(const std::weak_ptr<IAttackable>& t) {
     target = t;
 }
 
-IAttackable* DefaultAttackBehavior::findNearest(
+std::shared_ptr<IAttackable> DefaultAttackBehavior::findNearest(
     const Unit& u, const Map& map,
-    const std::vector<IAttackable*>& visibleEnemies
+    const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies
 ) const {
-    IAttackable* bestBase = nullptr;
+    std::shared_ptr<IAttackable> bestBase;
     float bestBaseDist = 1e9f;
 
-    IAttackable* bestUnit = nullptr;
+    std::shared_ptr<IAttackable> bestUnit;
     float bestUnitDist = 1e9f;
 
-    for(IAttackable* e : visibleEnemies) {
+    for(const auto& e : visibleEnemies) {
         if(!e || e->isDestroyed()) continue;
         float d = u.pos.mhtDistanceTo(e->getPos());
         if (e->getAttackType() == AttackableType::BASE) {
@@ -193,7 +202,7 @@ IAttackable* DefaultAttackBehavior::findNearest(
 
 bool DefaultAttackBehavior::inAttackRange(
     const Unit& self, const Map& map,
-    IAttackable* t
+    const std::shared_ptr<IAttackable>& t
 ) const {
     if(!t) return false;
     const Tile& tile = map.getTile(self.pos);
@@ -213,7 +222,7 @@ UnitBehavior::UnitBehavior() {
 }
 
 void UnitBehavior::issueMove(const Coord& dst) { command->issueMove(dst); }
-void UnitBehavior::issueAttack(IAttackable* t) { command->issueAttack(t); }
+void UnitBehavior::issueAttack(const std::shared_ptr<IAttackable>& t) { command->issueAttack(t); }
 void UnitBehavior::issueStop() { command->issueStop(); }
 
 bool UnitBehavior::isDead() const {
@@ -227,7 +236,7 @@ void UnitBehavior::onKilled(Unit& u) {
 
 void UnitBehavior::tickVision(
     Unit& u, const Map& map, 
-    const std::vector<IAttackable*>& enemies
+    const std::vector<std::weak_ptr<IAttackable>>& enemies
 ) {
     if(isDead()) return;
     vision->updateVisible(u, map, enemies);
@@ -249,7 +258,7 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
 
 void UnitBehavior::tickAttack(
     Unit& u, float dt, const Map& map,
-    const std::vector<IAttackable*>& enemies
+    const std::vector<std::weak_ptr<IAttackable>>& enemies
 ) {
     if(isDead()) return;
 
@@ -280,23 +289,20 @@ void UnitBehavior::tickAttack(
     switch(st) {
         case UnitState::Idle: {
             attack->update(u, dt, map, visible);
-            if(attack->getTarget()) {
+            auto tWeak = attack->getTarget();
+            if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);
                 break;
-            }
-            idleAccum += dt;
-            if(idleAccum >= 0.5f) {
-                idleAccum = 0.0f;
-
+            } else {
                 Coord dst = pickRandomWanderTarget(u, map, rng);
                 movement->setMoveTarget(dst, map, u);
                 stateMachine->set(UnitState::Wandering);
-            }
+            }      
             break;
         }     
         case UnitState::Attacking: {
             attack->update(u, dt, map, visible);
-            IAttackable* t = attack->getTarget();
+            auto t = attack->getTarget().lock();
             if(!t || t->isDestroyed()) {
                 stateMachine->set(UnitState::Idle);
                 break;
@@ -309,7 +315,7 @@ void UnitBehavior::tickAttack(
             break;
         }
         case UnitState::Chasing: {
-            IAttackable* t = attack->getTarget();
+            auto t = attack->getTarget().lock();
 
             if (!t || t->isDestroyed()) {
                 stateMachine->set(UnitState::Idle);
@@ -332,7 +338,8 @@ void UnitBehavior::tickAttack(
         }  
         case UnitState::Wandering: {
             attack->update(u, dt, map, visible);
-            if(attack->getTarget()) {
+            auto tWeak = attack->getTarget();
+            if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);
             }
 

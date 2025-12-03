@@ -27,6 +27,8 @@ public:
 
             if(world.baseA->isDestroyed() || world.baseB->isDestroyed()) {
                 running = false;
+                std::string winner = world.baseA->isDestroyed() ? "A" : "B";
+                std::cout << "Winner:" << winner << std::endl;
             }
         }
 

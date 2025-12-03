@@ -128,6 +128,10 @@ void TaskPool::workerLoop() {
     }
 }
 
+BaseSystem::BaseSystem() {
+    std::random_device rd;
+    rng.seed(rd());
+}
 
 void BaseSystem::update(GameWorld& world, float dt) {
     if (world.baseA && !world.baseA->isDestroyed()) {
@@ -141,27 +145,50 @@ void BaseSystem::update(GameWorld& world, float dt) {
 
 void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) const{
     Coord spawnPos = findSpawnPos(base, world);
-    auto u = std::make_unique<Unit>(t, spawnPos, base.getFaction());
+    if(spawnPos.x < 0 || spawnPos.y < 0) return;
+    Faction fac = base.getFaction();
 
-    if(base.getFaction() == Faction::A) {
-        world.unitsA.push_back(std::move(u));
-    } else {
-        world.unitsB.push_back(std::move(u));
+    try {
+        if (fac == Faction::A) {
+            world.unitsA.emplace_back(
+                std::make_shared<Unit>(t, spawnPos, fac)
+            );
+        } else {
+            world.unitsB.emplace_back(
+                std::make_shared<Unit>(t, spawnPos, fac)
+            );
+        }
+    } catch (const std::exception& e) {
+        // 极端情况下 new 失败也不要把程序崩了
+        std::cerr << "[BaseSystem] spawnUnit failed: " << e.what() << "\n";
+        return;
     }
 }
 
 Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) const {
     Coord c = base.getPos();
 
+    std::vector<Coord> cand;
     std::vector<Coord> nbrs;
+    cand.reserve(9);
+    cand.push_back(c);
     world.map.getNeighbors8(world.map, c, nbrs);
-    for(const Coord& n : nbrs) {
-        if(world.map.getTile(n).isPassable() && world.isTileFree(n)) {
-            return n;
-        }
+    for(auto c : nbrs) {
+        cand.push_back(c);
     }
+    std::vector<Coord> valid;
+    valid.reserve(cand.size());
+    for(auto c : cand) {
+        if (!world.map.inBounds(c)) continue;
+        const Tile& t = world.map.getTile(c);
+        if (!t.isPassable()) continue;
+        if (!world.isTileFree(c)) continue;   // 不要踩到别的 unit/base
+        valid.push_back(c);
+    }
+    if(valid.empty()) return Coord{-1, -1};
 
-    if(world.map.getTile(c).isPassable() && world.isTileFree(c)) return c;
+    std::uniform_int_distribution<std::size_t> dist(0,valid.size() - 1);
+    return valid[dist(rng)];
 }
 
 void MovementSystem::update(GameWorld& world, float dt)
@@ -221,7 +248,7 @@ void CleanupSystem::update(GameWorld& world)
     // 清理单位 A
     world.unitsA.erase(
         std::remove_if(world.unitsA.begin(), world.unitsA.end(),
-            [](const std::unique_ptr<Unit>& u){
+            [](const std::shared_ptr<Unit>& u){
                 return u->isDestroyed();
             }),
         world.unitsA.end()
@@ -230,11 +257,22 @@ void CleanupSystem::update(GameWorld& world)
     // 清理单位 B
     world.unitsB.erase(
         std::remove_if(world.unitsB.begin(), world.unitsB.end(),
-            [](const std::unique_ptr<Unit>& u){
+            [](const std::shared_ptr<Unit>& u){
                 return u->isDestroyed();
             }),
         world.unitsB.end()
     );
+
+     auto cleanWeakVec = [](std::vector<std::weak_ptr<IAttackable>>& v) {
+        v.erase(
+            std::remove_if(v.begin(), v.end(),
+                [](const std::weak_ptr<IAttackable>& w) { return w.expired(); }),
+            v.end()
+        );
+    };
+
+    cleanWeakVec(world.enemiesA);
+    cleanWeakVec(world.enemiesB);
 }
 
 static void moveCursor(int row, int col) {

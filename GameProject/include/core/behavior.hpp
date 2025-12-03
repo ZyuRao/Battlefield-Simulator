@@ -68,12 +68,12 @@ public:
     virtual ~ICommandBehavior() = default;
 
     virtual void issueMove(const Coord& dst) = 0;
-    virtual void issueAttack(IAttackable* t) = 0;
+    virtual void issueAttack(const std::shared_ptr<IAttackable>& t) = 0;
     virtual void issueStop() = 0;
 
     virtual UnitCommandType pendingType() const = 0;
     virtual Coord pendingMoveTarget() const = 0;
-    virtual IAttackable* pendingAttackTarget() const = 0;
+    virtual std::weak_ptr<IAttackable> pendingAttackTarget() const = 0;
 
     virtual void clear() = 0;
 };
@@ -82,15 +82,15 @@ class DefaultCommandBehavior : public ICommandBehavior {
 private:
     UnitCommandType pending = UnitCommandType::None;
     Coord moveTarget{};
-    IAttackable* attackTarget = nullptr;
+    std::weak_ptr<IAttackable> attackTarget;
 public:
     void issueMove(const Coord& dst) override;
-    void issueAttack(IAttackable* t) override;
+    void issueAttack(const std::shared_ptr<IAttackable>& t) override;
     void issueStop() override;
 
     UnitCommandType pendingType() const override;
     Coord pendingMoveTarget() const override;
-    IAttackable* pendingAttackTarget() const override;
+    std::weak_ptr<IAttackable> pendingAttackTarget() const override;
 
     void clear() override;
 };
@@ -135,36 +135,36 @@ public:
 class IAttackBehavior {
 public:
     virtual ~IAttackBehavior() = default;
-    virtual void setTarget(IAttackable* t) = 0;
-    virtual IAttackable* getTarget() const = 0;
+    virtual void setTarget(const std::weak_ptr<IAttackable>& t) = 0;
+    virtual std::weak_ptr<IAttackable> getTarget() const = 0;
     virtual void update(Unit& u, float dt, const Map& map, 
-                        const std::vector<IAttackable*>& visibleEnemies) = 0;
-    virtual IAttackable* findNearest(const Unit& self,
+                        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) = 0;
+    virtual std::shared_ptr<IAttackable> findNearest(const Unit& self,
                              const Map& map,
-                             const std::vector<IAttackable*>& visibleEnemies) const = 0;
+                             const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) const = 0;
 
     virtual bool inAttackRange(const Unit& self,
                        const Map& map,
-                       IAttackable* t) const = 0;
+                       const std::shared_ptr<IAttackable>& t) const = 0;
 };
 
 class DefaultAttackBehavior : public IAttackBehavior {
 private:
-    IAttackable* target = nullptr;
+    std::weak_ptr<IAttackable> target;
     float cd = 0.f;
   
 public:
-    IAttackable* findNearest(const Unit& self,
+    std::shared_ptr<IAttackable> findNearest(const Unit& self,
                              const Map& map,
-                             const std::vector<IAttackable*>& visibleEnemies) const;
+                             const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) const;
 
     bool inAttackRange(const Unit& self,
                        const Map& map,
-                       IAttackable* t) const;
-    IAttackable* getTarget() const override {return target; }
-    void setTarget(IAttackable* t) override;
+                       const std::shared_ptr<IAttackable>& t) const;
+    std::weak_ptr<IAttackable> getTarget() const override {return target; }
+    void setTarget(const std::weak_ptr<IAttackable>& t) override;
     void update(Unit& u, float dt, const Map& map,
-                const std::vector<IAttackable*>& visibleEnemies) override;
+                const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) override;
 };
 
 /*====================================
@@ -175,23 +175,23 @@ public:
     virtual ~IVisionBehavior() = default;
     virtual void updateVisible(Unit& self, 
                                const Map& map,
-                               const std::vector<IAttackable*>& enemies) = 0;
-    virtual const std::vector<IAttackable*>& getVisible() const = 0;
+                               const std::vector<std::weak_ptr<IAttackable>>& enemies) = 0;
+    virtual const std::vector<std::shared_ptr<IAttackable>>& getVisible() const = 0;
 };
 
 class DefaultVisionBehavior : public IVisionBehavior {
 private:
-    std::vector<IAttackable*> visible;
+    std::vector<std::shared_ptr<IAttackable>> visible;
 public:
     void updateVisible(Unit& self,
                        const Map& map,
-                       const std::vector<IAttackable*>& allEnemies) override;
-    const std::vector<IAttackable*>& getVisible() const override;
+                       const std::vector<std::weak_ptr<IAttackable>>& allEnemies) override;
+    const std::vector<std::shared_ptr<IAttackable>>& getVisible() const override;
 };
 
-/*====================================
+/* ====================================
     UnitBehavior（大脑）
-=====================================*/
+===================================== */
 class UnitBehavior {
 private:
     float idleAccum = 0.0f;
@@ -206,17 +206,17 @@ public:
     UnitBehavior();
 
     void issueMove(const Coord& dst);
-    void issueAttack(IAttackable* t);
+    void issueAttack(const std::shared_ptr<IAttackable>& t);
     void issueStop();
 
     bool isDead() const;
     void onKilled(Unit& u);
 
     void tickVision(Unit& u, const Map& map, 
-                    const std::vector<IAttackable*>& enenmies);
+                    const std::vector<std::weak_ptr<IAttackable>>& enenmies);
     void tickMovement(Unit& u, float dt, const Map& map);
     void tickAttack(Unit& u, float dt, const Map& map,
-        const std::vector<IAttackable*>& visibleEnemies);
+        const std::vector<std::weak_ptr<IAttackable>>& visibleEnemies);
 };
 
 
