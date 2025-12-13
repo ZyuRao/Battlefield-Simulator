@@ -3,6 +3,9 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <SFML/Graphics.hpp>
+#include <windows.h>
+#include <optional>
 
 
 namespace {
@@ -150,12 +153,26 @@ void GameWorld::startRenderThread() {
     if(!renderSystem) renderSystem = std::make_unique<RenderSystem>();
 
     renderThread = std::thread([this]() {
-        while(renderRunning.load()) {
+        sf::RenderWindow window(
+            sf::VideoMode({1200u, 800u}),
+            "Battlefield Simulator"
+        );
+        window.setFramerateLimit(60);
+        while(renderRunning.load() || window.isOpen()) {
+
+            while(const std::optional event = window.pollEvent()) {
+                if(event->is<sf::Event::Closed>()) {
+                    window.close();
+                    renderRunning.store(false);
+                }
+            }
+
+            window.clear(sf::Color::Black);
             {
                 std::shared_lock<std::shared_mutex> lock(worldMutex);
-                renderSystem->render(*this);
+                renderSystem->renderSfml(*this, window);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            window.display();
         }
     });
 }

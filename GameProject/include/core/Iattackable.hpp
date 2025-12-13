@@ -70,6 +70,7 @@ private:
 
     std::unique_ptr<BaseBehavior> behavior;
 
+    friend class RenderSystem;
 public:
     float baseProductTime = 3.f;
 
@@ -103,6 +104,7 @@ public:
     std::unique_ptr<UnitBehavior> behavior;
     //行为策略组合
 
+    friend class RenderSystem;
 public:
     Unit(UnitType t, const Coord& start, Faction faction);
 

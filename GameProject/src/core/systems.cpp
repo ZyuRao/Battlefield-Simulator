@@ -30,12 +30,12 @@ namespace {
     }
 
     inline void sleep_ms(int ms) {
-        #ifdef _WIN32
-            Sleep(ms);
-        #else
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-        #endif
-        }
+    #ifdef _WIN32
+        Sleep(ms);
+    #else
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    #endif
+    }
 
 }
 
