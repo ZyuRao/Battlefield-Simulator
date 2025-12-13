@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <shared_mutex>
 #include <cassert>
+#include <windows.h>
+#include <SFML/Graphics.hpp>
 
 
 
@@ -93,14 +95,60 @@ private:
 
 class RenderSystem {
 public:
-    RenderSystem() = default;
-    ~RenderSystem() = default;
+    RenderSystem();
 
-    void render(const GameWorld& world);
+    void renderAscii(const GameWorld& world);
     //for ASCII
+    void renderSfml(const GameWorld& world, sf::RenderWindow& window);
 
 private:
     std::vector<std::string> lastBuffer;
+
+    struct Layout {
+        float tileSize;
+        float offsetX;
+        float offsetY;
+        float hudX;
+    };
+
+    sf::Font hudFont;
+    bool fontLoaded = false;
+
+    // 工具函数
+    void ensureFontLoaded();
+
+    Layout   computeLayout(const GameWorld& world,
+                           const sf::RenderWindow& window) const;
+    sf::Color tileColor(TileType t) const;
+    sf::Color factionColor(Faction f) const;
+    sf::Color unitTypeColor(UnitType t) const;
+
+    void drawMapLayer(const GameWorld& world,
+                      sf::RenderWindow& window,
+                      const Layout& layout);
+
+    void drawBaseLayer(const GameWorld& world,
+                       sf::RenderWindow& window,
+                       const Layout& layout);
+
+    void drawUnitLayer(const GameWorld& world,
+                       sf::RenderWindow& window,
+                       const Layout& layout);
+
+    void drawHpBar(sf::RenderWindow& window,
+                   sf::Vector2f center,
+                   float width,
+                   float hp,
+                   float maxHp) const;
+
+    void drawUnitIcon(sf::RenderWindow& window,
+                      sf::Vector2f center,
+                      UnitType type,
+                      Faction faction);
+
+    void drawHud(const GameWorld& world,
+                 sf::RenderWindow& window,
+                 const Layout& layout);
 };
 
 class GameWorld {

@@ -8,9 +8,11 @@
         "${workspaceFolder}/GameProject/include/utils",
         "${workspaceFolder}/GameProject/include/core",
         "${workspaceFolder}/GameProject/include/input",
-        "${workspaceFolder}/GameProject/include/render"
+        "${workspaceFolder}/GameProject/include/render",
+        "C:/MinGW/mingw64/include/**",
+        "C:/MinGW/mingw64/include/SFML-3.0.2/*"
       ],
-      "compilerPath": "C:/mingw64/bin/gcc.exe",
+      "compilerPath": "C:/MinGW/mingw64/bin/gcc.exe",
       "cStandard": "${default}",
       "cppStandard": "${default}",
       "intelliSenseMode": "windows-gcc-x64",
