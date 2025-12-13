@@ -64,15 +64,15 @@ class Base : public IAttackable {
 private:
     Coord pos;
     Faction faction;
-    float maxHp = 500;
-    float hp;
+    float maxHp = 500.f;
+    float hp = maxHp;
 
 
     std::unique_ptr<BaseBehavior> behavior;
 
     friend class RenderSystem;
 public:
-    float baseProductTime = 3.f;
+    float baseProductTime = 2.f;
 
     Base(const Coord& p, Faction f);
     void update(float dt, GameWorld& world);

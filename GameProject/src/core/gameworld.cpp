@@ -66,7 +66,7 @@ namespace {
 } 
 
 GameWorld::GameWorld()
-    : map(MAP_HEIGHT, MAP_HEIGHT), baseSystem()
+    : map(MAP_WIDTH, MAP_HEIGHT), baseSystem()
     , renderRunning(false), taskPool(4)
 {
     MapGenerator gen(MAP_WIDTH, MAP_HEIGHT);
@@ -152,9 +152,17 @@ void GameWorld::startRenderThread() {
     if(!renderSystem) renderSystem = std::make_unique<RenderSystem>();
 
     renderThread = std::thread([this]() {
+        const unsigned W = static_cast<unsigned>(map.getWidth());
+        const unsigned H = static_cast<unsigned>(map.getHeight());
+
+        const unsigned tile = 26;     // 你想要的视觉密度
+        const unsigned hud  = 260;
+        const unsigned pad  = 40;
+
         sf::RenderWindow window(
-            sf::VideoMode({1200u, 800u}),
-            "Battlefield Simulator"
+            sf::VideoMode({hud + pad + tile * W, pad + tile * H}),
+            "Battlefield Simulator",
+            sf::Style::Titlebar | sf::Style::Close
         );
         window.setFramerateLimit(60);
         while(renderRunning.load() || window.isOpen()) {

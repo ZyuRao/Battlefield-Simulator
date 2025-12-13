@@ -9,22 +9,61 @@
 class GameWorld;
 
 namespace {
-    Coord pickRandomWanderTarget(const Unit& u, const Map& map, std::mt19937& rng){
+    Coord pickRandomWanderTarget(const Unit& u, const Map& map, 
+            const std::vector<std::weak_ptr<IAttackable>>& enemies, std::mt19937& rng){
         std::uniform_int_distribution<int> dx(-5, 5);
         std::uniform_int_distribution<int> dy(-5, 5);
 
         Coord start = u.getPos();
 
-        for(int tries = 0; tries < 20; tries++) {
-            Coord cand{start.x + dx(rng), start.y + dy(rng)};
-            if(!map.inBounds(cand)) continue;
+        bool hasBase = false;
+        Coord basePos = start;
+        for (const auto& w : enemies) {
+            auto e = w.lock();
+            if (!e || e->isDestroyed()) continue;
+            if (e->getAttackType() == AttackableType::BASE) {
+                basePos = e->getPos();
+                hasBase = true;
+                break;
+            }
+        }
+        auto sgn = [](int v) { return (v > 0) - (v < 0); };
+        const int dirX = sgn(basePos.x - start.x);
+        const int dirY = sgn(basePos.y - start.y);
 
-            if(!map.getTile(cand).isPassable()) continue;
+        std::uniform_int_distribution<int> stepDist(4, 9);
+        std::uniform_int_distribution<int> noise(-3, 3);
+        std::uniform_real_distribution<float> jitter(0.f, 1.f);
 
-            if(map.isReachable(start, cand)) return cand;
+        Coord best = start;
+        float bestScore = -1e30f;
+
+        for (int tries = 0; tries < 30; ++tries) {
+            int step = stepDist(rng);
+            Coord cand{
+                start.x + dirX * step + noise(rng),
+                start.y + dirY * step + noise(rng)
+            };
+
+            if (!map.inBounds(cand)) continue;
+            const Tile& tile = map.getTile(cand);
+            if (!tile.isPassable()) continue;
+            if (!map.isReachable(start, cand)) continue;
+
+            float dBase = static_cast<float>(cand.mhtDistanceTo(basePos));
+            float cost  = tile.getMoveCost();
+            float dSelf = static_cast<float>(cand.mhtDistanceTo(start));
+
+            // 权重可后续再调：目前偏“更快相遇/更快推进”
+            float score = (-1.2f * dBase) + (-2.0f * cost) + (-0.15f * dSelf) + 0.01f * jitter(rng);
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = cand;
+            }
         }
 
-        return start;
+        return best;
     }
 }
 
@@ -294,7 +333,7 @@ void UnitBehavior::tickAttack(
                 stateMachine->set(UnitState::Attacking);
                 break;
             } else {
-                Coord dst = pickRandomWanderTarget(u, map, rng);
+                Coord dst = pickRandomWanderTarget(u, map, enemies, rng);
                 movement->setMoveTarget(dst, map, u);
                 stateMachine->set(UnitState::Wandering);
             }      
@@ -472,7 +511,7 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
 };
 
 
-Base::Base(const Coord& p, Faction f) : pos(p), faction(f) {
+Base::Base(const Coord& p, Faction f) : pos(p), faction(f), hp(maxHp){
         behavior = std::make_unique<BaseBehavior>();
     }
 

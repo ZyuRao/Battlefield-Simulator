@@ -1,6 +1,8 @@
 #include "core/gameworld.hpp"
 #include <iostream>
 #include <string>
+#include <unordered_set>
+#include <cstdint>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -37,6 +39,10 @@ namespace {
     #endif
     }
 
+    inline std::uint64_t packCoord(const Coord& c) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
+    }
 }
 
 TimeManager::TimeManager()
@@ -208,18 +214,59 @@ Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) const {
 
 void MovementSystem::update(GameWorld& world, float dt)
 {
-    // A 阵营
-    for (auto& u : world.unitsA) {
-        if (u->isAlive()) {
-            u->behavior->tickMovement(*u, dt, world.map);
-        }
-    }
+    const float maxMoveDt = 0.05f;
+    if (dt > maxMoveDt) dt = maxMoveDt;
 
-    // B 阵营
-    for (auto& u : world.unitsB) {
-        if (u->isAlive()) {
+    std::unordered_set<std::uint64_t> occ;
+    occ.reserve(world.unitsA.size() + world.unitsB.size() + 4);
+
+    auto occupyIf = [&](bool ok, const Coord& c) {
+        if (ok) occ.insert(packCoord(c));
+    };
+
+    // 先把基地、所有单位当前位置登记为“已占用”
+    occupyIf(world.baseA && !world.baseA->isDestroyed(), world.baseA->getPos());
+    occupyIf(world.baseB && !world.baseB->isDestroyed(), world.baseB->getPos());
+    for (auto& u : world.unitsA) occupyIf(u && u->isAlive(), u->getPos());
+    for (auto& u : world.unitsB) occupyIf(u && u->isAlive(), u->getPos());
+
+    auto stepUnits = [&](std::vector<std::shared_ptr<Unit>>& units) {
+        for (auto& u : units) {
+            if (!u || !u->isAlive()) continue;
+            Coord prev = u->getPos();
+
+            // 让单位按自身逻辑尝试移动（dt 很小的话基本只会走 0/1 格）
             u->behavior->tickMovement(*u, dt, world.map);
+
+            Coord now = u->getPos();
+            if (now == prev) continue;
+
+            const auto kPrev = packCoord(prev);
+            const auto kNow  = packCoord(now);
+
+            // 释放旧位置，再检查新位置是否被占
+            occ.erase(kPrev);
+
+            if (occ.find(kNow) != occ.end()) {
+                // 冲突：回滚
+                u->pos = prev;            // pos 在 Unit 里是 public（最小侵入）
+                occ.insert(kPrev);
+            } else {
+                // 成功：占用新位置
+                occ.insert(kNow);
+            }
         }
+    };
+
+    // 为了减少“固定顺序”导致的偏置，每帧交替先更新 A/B
+    static bool flip = false;
+    flip = !flip;
+    if (!flip) {
+        stepUnits(world.unitsA);
+        stepUnits(world.unitsB);
+    } else {
+        stepUnits(world.unitsB);
+        stepUnits(world.unitsA);
     }
 }
 

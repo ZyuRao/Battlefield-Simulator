@@ -182,14 +182,8 @@ void RenderSystem::drawHpBar(sf::RenderWindow& window,
     // --- 前景条（当前血量）---
     sf::RectangleShape front;
     front.setSize(sf::Vector2f{barWidth * ratio, barHeight});
-    front.setOrigin(sf::Vector2f{barWidth * 0.5f, barHeight * 0.5f});
-
-    // 为了让条从左往右填充：整体向左偏一点
-    sf::Vector2f frontPos{
-        center.x - (barWidth * (1.f - ratio)) * 0.5f,
-        center.y
-    };
-    front.setPosition(frontPos);
+    front.setOrigin(sf::Vector2f{0.f, barHeight * 0.5f});
+    front.setPosition({center.x - barWidth * 0.5f, center.y});
 
     // 颜色：绿 -> 黄 -> 红
     sf::Color c;
