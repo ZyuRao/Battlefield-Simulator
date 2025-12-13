@@ -2,23 +2,25 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "C/C++ Runner: Debug Session",
+      "name": "Launch GameProject (WSL)",
       "type": "cppdbg",
       "request": "launch",
+      "program": "${workspaceFolder}/build/GameProject",
       "args": [],
       "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": ".",
-      "program": "build/Debug/outDebug",
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
       "MIMode": "gdb",
-      "miDebuggerPath": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
       "setupCommands": [
         {
           "description": "Enable pretty-printing for gdb",
           "text": "-enable-pretty-printing",
           "ignoreFailures": true
         }
-      ]
+      ],
+      "preLaunchTask": "Build (CMake)"
     }
   ]
 }

@@ -1,23 +1,18 @@
 {
+  "version": 4,
   "configurations": [
     {
-      "name": "windows-gcc-x64",
+      "name": "WSL-GCC",
+      "compilerPath": "/usr/bin/g++",
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "linux-gcc-x64",
       "includePath": [
-        "${workspaceFolder}/**",
         "${workspaceFolder}/GameProject/include",
-        "${workspaceFolder}/GameProject/include/utils",
-        "${workspaceFolder}/GameProject/include/core",
-        "${workspaceFolder}/GameProject/include/input",
-        "${workspaceFolder}/GameProject/include/render"
+        "/usr/local/include",
+        "/usr/include"
       ],
-      "compilerPath": "C:/mingw64/bin/gcc.exe",
-      "cStandard": "${default}",
-      "cppStandard": "${default}",
-      "intelliSenseMode": "windows-gcc-x64",
-      "compilerArgs": [
-        ""
-      ]
+      "defines": []
     }
-  ],
-  "version": 4
+  ]
 }

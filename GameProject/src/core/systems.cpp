@@ -1,7 +1,13 @@
 #include "core/gameworld.hpp"
 #include <iostream>
 #include <string>
-#include <windows.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <thread>
+    #include <chrono>
+#endif
 namespace {
     void clearScreen() {
         #ifdef _WIN32
@@ -22,6 +28,15 @@ namespace {
             std::cout << "\x1b[2J\x1b[H";
         #endif
     }
+
+    inline void sleep_ms(int ms) {
+        #ifdef _WIN32
+            Sleep(ms);
+        #else
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        #endif
+        }
+
 }
 
 TimeManager::TimeManager()
