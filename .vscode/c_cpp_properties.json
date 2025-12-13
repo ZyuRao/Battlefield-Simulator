@@ -9,27 +9,10 @@
       "intelliSenseMode": "linux-gcc-x64",
       "includePath": [
         "${workspaceFolder}/GameProject/include",
-<<<<<<< HEAD
         "/usr/local/include",
         "/usr/include"
       ],
       "defines": []
-=======
-        "${workspaceFolder}/GameProject/include/utils",
-        "${workspaceFolder}/GameProject/include/core",
-        "${workspaceFolder}/GameProject/include/input",
-        "${workspaceFolder}/GameProject/include/render",
-        "C:/MinGW/mingw64/include/**",
-        "C:/MinGW/mingw64/include/SFML-3.0.2/*"
-      ],
-      "compilerPath": "C:/MinGW/mingw64/bin/gcc.exe",
-      "cStandard": "${default}",
-      "cppStandard": "${default}",
-      "intelliSenseMode": "windows-gcc-x64",
-      "compilerArgs": [
-        ""
-      ]
->>>>>>> d5a5e057f448dec79b41fbf5939f952cffdeb01e
     }
   ]
 }

@@ -1,32 +1,27 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 project(GameProject CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-
-set(SFML_ROOT "C:/MinGW/mingw64/include/SFML-3.0.2")
-# ===== include 目录 =====
-include_directories(
-    "${CMAKE_SOURCE_DIR}/include"
-    "${SFML_ROOT}/include"
-)
-
-# 递归搜索 src/ 中的所有 cpp
+# 源文件
 file(GLOB_RECURSE SRC_FILES
-    "src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
-add_executable(GameProject ${SRC_FILES} main.cpp)
-# 单独加入 main.cpp（因为它不在 src 下面）
+add_executable(GameProject
+    ${SRC_FILES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+)
 
-<<<<<<< HEAD
-# 头文件路径
+
+# 头文件路径（包括 FastNoiseLite）
 target_include_directories(GameProject
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# SFML 3（你在 WSL 里已经安装到 /usr/local 的情况）
 set(SFML_STATIC_LIBRARIES ON)
 find_package(SFML 3 REQUIRED COMPONENTS Graphics Window System Audio)
 
@@ -37,16 +32,4 @@ target_link_libraries(GameProject
         SFML::System
         SFML::Audio
 )
-=======
-# 生成可执行文件
-add_executable(GameProject ${SRC_FILES})
 
-link_directories("${SFML_ROOT}/lib")
-
-target_link_libraries(GameProject
-    PRIVATE
-        sfml-graphics-3
-        sfml-window-3
-        sfml-system-3
-)
->>>>>>> d5a5e057f448dec79b41fbf5939f952cffdeb01e

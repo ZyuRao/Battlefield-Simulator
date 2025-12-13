@@ -1,5 +1,5 @@
 #include "core/map.hpp"
-#include "FastNoiseLite.h"
+#include "external/FastNoiseLite.h"
 //https://github.com/Auburn/FastNoiseLite
 
 

@@ -31,7 +31,7 @@ RenderSystem::RenderSystem() : fontLoaded(false) {}
 
 void RenderSystem::ensureFontLoaded() {
     if(fontLoaded) return;
-    if(hudFont.openFromFile("../assets/fonts/NotoSansMono-VariableFont_wdth,wght.ttf")) {
+    if(hudFont.openFromFile("../assets/NotoSansMono-VariableFont_wdth,wght.ttf")) {
         fontLoaded = true;
     } else {
         fontLoaded = false;

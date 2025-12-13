@@ -10,7 +10,9 @@
 #include <condition_variable>
 #include <shared_mutex>
 #include <cassert>
-#include <windows.h>
+#ifdef _WIN32
+    #include <windows.h>
+#endif
 #include <SFML/Graphics.hpp>
 
 
