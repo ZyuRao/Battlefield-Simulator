@@ -170,14 +170,15 @@ void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) const{
     Faction fac = base.getFaction();
 
     try {
+        auto makeUnit = [&](std::vector<std::shared_ptr<Unit>>& bucket) {
+            auto u = std::make_shared<Unit>(t, spawnPos, fac);
+            world.registerUnit(u);
+            bucket.emplace_back(std::move(u));
+        };
         if (fac == Faction::A) {
-            world.unitsA.emplace_back(
-                std::make_shared<Unit>(t, spawnPos, fac)
-            );
+            makeUnit(world.unitsA);
         } else {
-            world.unitsB.emplace_back(
-                std::make_shared<Unit>(t, spawnPos, fac)
-            );
+            makeUnit(world.unitsB);
         }
     } catch (const std::exception& e) {
         // 极端情况下 new 失败也不要把程序崩了

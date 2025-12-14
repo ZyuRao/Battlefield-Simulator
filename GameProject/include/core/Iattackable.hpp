@@ -66,7 +66,7 @@ private:
     Faction faction;
     float maxHp = 500.f;
     float hp = maxHp;
-
+    int   id = -1;
 
     std::unique_ptr<BaseBehavior> behavior;
 
@@ -77,6 +77,10 @@ public:
     Base(const Coord& p, Faction f);
     void update(float dt, GameWorld& world);
 
+    void setId(int v) { id = v; }
+    int getId() const { return id; }
+
+    void issueProduce(UnitType t);
 
     Coord getPos() const override { return pos; }
     AttackableType getAttackType() const override {
@@ -94,6 +98,7 @@ public:
 
 class Unit : public IAttackable {
 public: 
+    int id = -1;
     UnitType type;
     Coord pos;
     float hp;
@@ -107,6 +112,12 @@ public:
     friend class RenderSystem;
 public:
     Unit(UnitType t, const Coord& start, Faction faction);
+
+    void setId(int v) { id = v; }
+    int getId() const { return id; }
+    void issueMove(const Coord& dst);
+    void issueAttackTarget(const std::shared_ptr<IAttackable>& t);
+    void issueStop();
 
     Coord getPos() const override { return pos; }
 

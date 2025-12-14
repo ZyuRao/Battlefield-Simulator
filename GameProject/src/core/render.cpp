@@ -3,6 +3,8 @@
 #include <string>
 #include <optional>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 
 namespace {
@@ -27,11 +29,13 @@ namespace {
     }
 }
 
-RenderSystem::RenderSystem() : fontLoaded(false) {}
+RenderSystem::RenderSystem() : fontLoaded(false) {
+    clock.restart();
+}
 
 void RenderSystem::ensureFontLoaded() {
     if(fontLoaded) return;
-    if(hudFont.openFromFile("../assets/NotoSansMono-VariableFont_wdth,wght.ttf")) {
+    if(hudFont.openFromFile("./assets/NotoSansMono-VariableFont_wdth,wght.ttf")) {
         fontLoaded = true;
     } else {
         fontLoaded = false;
@@ -195,6 +199,22 @@ void RenderSystem::drawHpBar(sf::RenderWindow& window,
     window.draw(front);
 }
 
+void RenderSystem::drawSelectionRing(sf::RenderWindow& window,
+                                     sf::Vector2f center,
+                                     float radius,
+                                     Faction f) {
+    sf::CircleShape ring;
+    ring.setRadius(radius);
+    ring.setOrigin(sf::Vector2f{radius, radius});
+    ring.setPosition(center);
+    ring.setFillColor(sf::Color::Transparent);
+    auto color = factionColor(f);
+    color.a = 220;
+    ring.setOutlineColor(color);
+    ring.setOutlineThickness(3.f);
+    window.draw(ring);
+}
+
 
 void RenderSystem::drawUnitIcon(sf::RenderWindow& window,
                                 sf::Vector2f center,
@@ -248,7 +268,17 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
                 layout.offsetY + y * layout.tileSize
             };
             tileShape.setPosition(pos);
-            tileShape.setFillColor(tileColor(tile.getType()));
+            sf::Color base = tileColor(tile.getType());
+            float shade = 0.78f + 0.18f * std::sin((x + y * 0.45f) * 0.35f);
+            auto applyShade = [&](int c) -> std::uint8_t {
+                int v = static_cast<int>(static_cast<float>(c) * shade + 10.f);
+                v = std::clamp(v, 0, 255);
+                return static_cast<std::uint8_t>(v);
+            };
+            base.r = applyShade(base.r);
+            base.g = applyShade(base.g);
+            base.b = applyShade(base.b);
+            tileShape.setFillColor(base);
 
             window.draw(tileShape);
         }
@@ -291,6 +321,19 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
         };
         drawHpBar(window, hpCenter, layout.tileSize * 0.9f,
                   base->hp, base->maxHp);
+
+        // 基地 ID
+        ensureFontLoaded();
+        if (fontLoaded) {
+            sf::Text idText(hudFont, "Base #" + std::to_string(base->getId()));
+            idText.setCharacterSize(14);
+            idText.setFillColor(sf::Color::White);
+            auto bounds = idText.getLocalBounds();
+            idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
+                              bounds.position.y + bounds.size.y * 0.5f});
+            idText.setPosition({center.x, center.y + layout.tileSize * 0.65f});
+            window.draw(idText);
+        }
     };
 
     drawBaseOne(world.baseA);
@@ -301,6 +344,8 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
                                  sf::RenderWindow& window,
                                  const Layout& layout)
 {
+    const auto& selected = world.getSelection();
+
     auto drawUnits = [&](const auto& units) {
         for (const auto& uPtr : units) {
             const Unit& u = *uPtr;
@@ -329,6 +374,13 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
 
             window.draw(shape);
 
+            const bool isSelected = std::find(selected.begin(),
+                                              selected.end(),
+                                              u.id) != selected.end();
+            if (isSelected) {
+                drawSelectionRing(window, center, layout.tileSize * 0.40f, f);
+            }
+
             // 单位血条：单位圆上方一点
             sf::Vector2f hpCenter{
                 center.x,
@@ -339,6 +391,19 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
 
             // 单位字母图标：I/A/K
             drawUnitIcon(window, center, t, f);
+
+            // ID 标签
+            ensureFontLoaded();
+            if (fontLoaded) {
+                sf::Text idText(hudFont, "#" + std::to_string(u.id));
+                idText.setCharacterSize(12);
+                idText.setFillColor(sf::Color::Black);
+                auto bounds = idText.getLocalBounds();
+                idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
+                                  bounds.position.y + bounds.size.y * 0.5f});
+                idText.setPosition({center.x, center.y + layout.tileSize * 0.35f});
+                window.draw(idText);
+            }
         }
     };
 
@@ -420,6 +485,126 @@ void RenderSystem::drawHud(const GameWorld& world,
                    std::to_string(static_cast<int>(maxB)));
     text.setPosition(sf::Vector2f{ x, y });
     window.draw(text);
+    y += 30.f;
+
+    const auto& selected = world.getSelection();
+    std::string selStr = "Selected: ";
+    if (selected.empty()) selStr += "None";
+    else {
+        for (size_t i = 0; i < selected.size(); ++i) {
+            selStr += "#" + std::to_string(selected[i]);
+            if (i + 1 < selected.size()) selStr += ", ";
+        }
+    }
+    text.setFillColor(sf::Color(200, 220, 230));
+    text.setString(selStr);
+    text.setPosition(sf::Vector2f{ x, y });
+    window.draw(text);
+}
+
+void RenderSystem::drawCommandPanel(const GameWorld& world,
+                                    sf::RenderWindow& window,
+                                    const Layout& layout)
+{
+    ensureFontLoaded();
+    if (!fontLoaded) return;
+
+    float padding = 12.f;
+    float boxWidth = std::max(240.f, static_cast<float>(window.getSize().x) - layout.hudX - 20.f);
+    float boxHeight = 80.f;
+    float x = layout.hudX;
+    float y = static_cast<float>(window.getSize().y) - boxHeight - 10.f;
+
+    sf::RectangleShape box;
+    box.setSize({boxWidth, boxHeight});
+    box.setPosition({x, y});
+    box.setFillColor(sf::Color(20, 20, 30, 200));
+    box.setOutlineColor(sf::Color(80, 130, 230, 200));
+    box.setOutlineThickness(1.5f);
+    window.draw(box);
+
+    sf::Text line(hudFont);
+    line.setCharacterSize(14);
+    line.setFillColor(sf::Color::White);
+
+    line.setString("CMD> " + inputBuffer + (inputActive ? "_" : ""));
+    line.setPosition({x + padding, y + 8.f});
+    window.draw(line);
+
+    sf::Text last(hudFont, "Last: " + world.getLastCommandInput());
+    last.setCharacterSize(13);
+    last.setFillColor(sf::Color(200, 200, 200));
+    last.setPosition({x + padding, y + 30.f});
+    window.draw(last);
+
+    sf::Text feedback(hudFont, "Status: " + world.getLastCommandFeedback());
+    feedback.setCharacterSize(13);
+    feedback.setFillColor(sf::Color(170, 220, 170));
+    feedback.setPosition({x + padding, y + 52.f});
+    window.draw(feedback);
+}
+
+void RenderSystem::drawIntroOverlay(sf::RenderWindow& window) {
+    float t = clock.getElapsedTime().asSeconds();
+    if (t > 1.6f) return;
+
+    float alpha = static_cast<float>(std::max(0.0f, 1.0f - t / 1.6f));
+    sf::RectangleShape fade;
+    fade.setSize(sf::Vector2f{static_cast<float>(window.getSize().x),
+                              static_cast<float>(window.getSize().y)});
+    fade.setFillColor(sf::Color(0, 0, 0, static_cast<std::uint8_t>(alpha * 180.f)));
+    window.draw(fade);
+}
+
+void RenderSystem::drawWinOverlay(const GameWorld& world,
+                                  sf::RenderWindow& window,
+                                  const Layout& /*layout*/)
+{
+    bool aDead = world.baseA && world.baseA->isDestroyed();
+    bool bDead = world.baseB && world.baseB->isDestroyed();
+    if (!aDead && !bDead) return;
+
+    std::string textStr = aDead ? "Faction B Wins" : "Faction A Wins";
+    ensureFontLoaded();
+    if (!fontLoaded) return;
+
+    sf::RectangleShape mask;
+    mask.setSize(sf::Vector2f{static_cast<float>(window.getSize().x),
+                              static_cast<float>(window.getSize().y)});
+    mask.setFillColor(sf::Color(0, 0, 0, 120));
+    window.draw(mask);
+
+    float t = std::fmod(clock.getElapsedTime().asSeconds(), 1.5f);
+    float scale = 1.0f + 0.05f * std::sin(t * 3.14f * 2.f);
+
+    sf::Text txt(hudFont, textStr);
+    txt.setCharacterSize(34);
+    txt.setFillColor(sf::Color(255, 220, 120));
+    auto bounds = txt.getLocalBounds();
+    txt.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
+                   bounds.position.y + bounds.size.y * 0.5f});
+    txt.setPosition({window.getSize().x * 0.5f, window.getSize().y * 0.5f});
+    txt.setScale({scale, scale});
+    window.draw(txt);
+}
+
+std::optional<Coord> RenderSystem::pixelToTile(const GameWorld& world,
+                                               const sf::RenderWindow& window,
+                                               const sf::Vector2i& pixel) const
+{
+    Layout layout = computeLayout(world, window);
+    float localX = static_cast<float>(pixel.x) - layout.offsetX;
+    float localY = static_cast<float>(pixel.y) - layout.offsetY;
+    if (localX < 0.f || localY < 0.f) return std::nullopt;
+    int gx = static_cast<int>(localX / layout.tileSize);
+    int gy = static_cast<int>(localY / layout.tileSize);
+
+    if (gx < 0 || gy < 0 ||
+        gx >= world.map.getWidth() ||
+        gy >= world.map.getHeight()) {
+        return std::nullopt;
+    }
+    return Coord{gx, gy};
 }
 
 // ============ 渲染总入口 ============
@@ -433,4 +618,7 @@ void RenderSystem::renderSfml(const GameWorld& world,
     drawBaseLayer(world, window, layout);
     drawUnitLayer(world, window, layout);
     drawHud(world, window, layout);
+    drawCommandPanel(world, window, layout);
+    drawWinOverlay(world, window, layout);
+    drawIntroOverlay(window);
 }

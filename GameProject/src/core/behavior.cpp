@@ -515,6 +515,10 @@ Base::Base(const Coord& p, Faction f) : pos(p), faction(f), hp(maxHp){
         behavior = std::make_unique<BaseBehavior>();
     }
 
+void Base::issueProduce(UnitType t) {
+    if (behavior) behavior->issueProduce(t);
+}
+
 void Base::update(float dt, GameWorld& world){
     behavior->update(*this, dt, world);
 }
@@ -537,6 +541,18 @@ Unit::Unit(UnitType t, const Coord& start, Faction faction)
     hp = baseStats.maxHP;
 
     behavior = std::make_unique<UnitBehavior>();
+}
+
+void Unit::issueMove(const Coord& dst) {
+    behavior->issueMove(dst);
+}
+
+void Unit::issueAttackTarget(const std::shared_ptr<IAttackable>& t) {
+    behavior->issueAttack(t);
+}
+
+void Unit::issueStop() {
+    behavior->issueStop();
 }
 
 void Unit::takeDamage(float dmg){

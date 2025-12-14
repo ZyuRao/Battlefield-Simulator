@@ -10,10 +10,12 @@
 #include <condition_variable>
 #include <shared_mutex>
 #include <cassert>
+#include <optional>
 #ifdef _WIN32
     #include <windows.h>
 #endif
 #include <SFML/Graphics.hpp>
+#include "command.hpp"
 
 
 
@@ -151,6 +153,29 @@ private:
     void drawHud(const GameWorld& world,
                  sf::RenderWindow& window,
                  const Layout& layout);
+
+    void drawCommandPanel(const GameWorld& world,
+                          sf::RenderWindow& window,
+                          const Layout& layout);
+
+    void drawIntroOverlay(sf::RenderWindow& window);
+    void drawWinOverlay(const GameWorld& world,
+                        sf::RenderWindow& window,
+                        const Layout& layout);
+
+    std::optional<Coord> pixelToTile(const GameWorld& world,
+                                     const sf::RenderWindow& window,
+                                     const sf::Vector2i& pixel) const;
+
+    void drawSelectionRing(sf::RenderWindow& window,
+                           sf::Vector2f center,
+                           float radius,
+                           Faction f);
+
+    sf::Clock clock;
+    bool inputActive = false;
+    std::string inputBuffer;
+    friend class GameWorld;
 };
 
 class GameWorld {
@@ -180,6 +205,15 @@ private:
     std::thread                   renderThread;
     std::atomic<bool>             renderRunning{false};
 
+    // --- 命令和交互状态 ---
+    CommandQueue           commandQueue;
+    std::string            lastCommandInput;
+    std::string            lastCommandFeedback;
+    std::vector<int>       selectedUnitIds;
+    bool                   quitRequested = false;
+    int                    nextUnitId = 1;
+    int                    nextBaseId = 1;
+
     mutable std::shared_mutex worldMutex;
 
     
@@ -191,6 +225,7 @@ private:
     friend class BaseSystem;
     friend class RenderSystem;
     friend class Game;
+    friend CommandResult executeCommand(const Command& cmd, GameWorld& world);
 
 public:
     GameWorld();
@@ -208,6 +243,26 @@ public:
     
     void rebuildEnemies();
 
+    // 命令/选中/辅助接口
+    void enqueueCommand(const std::string& line);
+    void processCommands();
+
+    std::shared_ptr<Unit> findUnit(int id) const;
+    std::shared_ptr<Base> findBase(int id, Faction fac) const;
+    std::shared_ptr<IAttackable> findAttackable(int id) const;
+
+    void setSelection(const std::vector<int>& ids);
+    void clearSelection();
+    const std::vector<int>& getSelection() const { return selectedUnitIds; }
+
+    const std::string& getLastCommandInput() const { return lastCommandInput; }
+    const std::string& getLastCommandFeedback() const { return lastCommandFeedback; }
+
+    bool shouldQuit() const { return quitRequested; }
+    void requestQuit() { quitRequested = true; }
+
+    int registerUnit(const std::shared_ptr<Unit>& u);
+    int registerBase(const std::shared_ptr<Base>& b);
 
     
 };

@@ -5,11 +5,12 @@
 #include <iostream>
 #include <SFML/Graphics.hpp>
 #include <optional>
+#include <unordered_set>
 
 
 namespace {
-    constexpr int MAP_WIDTH = 40;
-    constexpr int MAP_HEIGHT = 10;
+    constexpr int MAP_WIDTH = 30;
+    constexpr int MAP_HEIGHT = 30;
 
     // 在一个矩形区域内寻找第一个可通行格子
     bool findPassableInRegion(const Map& map,
@@ -85,6 +86,8 @@ GameWorld::GameWorld()
     }
     baseA = std::make_shared<Base>(baseAPos, Faction::A);
     baseB = std::make_shared<Base>(baseBPos, Faction::B);
+    registerBase(baseA);
+    registerBase(baseB);
 
     enemiesA.clear();
     enemiesB.clear();
@@ -109,6 +112,8 @@ void GameWorld::update() {
     float dt = timeManager.getDeltaTime();
     // std::cout << "  dt=" << dt << "\n";
 
+    processCommands();
+
     // std::cout << "  BaseSystem...\n";
     baseSystem.update(*this, dt);
     rebuildEnemies();
@@ -124,6 +129,16 @@ void GameWorld::update() {
 
     // std::cout << "  CleanupSystem...\n";
     cleanupSystem.update(*this);
+
+    // 清理选中列表中已不存在的单位
+    std::unordered_set<int> alive;
+    for (auto& u : unitsA) if (u && u->isAlive()) alive.insert(u->id);
+    for (auto& u : unitsB) if (u && u->isAlive()) alive.insert(u->id);
+    selectedUnitIds.erase(
+        std::remove_if(selectedUnitIds.begin(), selectedUnitIds.end(),
+            [&](int id){ return alive.find(id) == alive.end(); }),
+        selectedUnitIds.end()
+    );
 }
 
 
@@ -150,6 +165,7 @@ void GameWorld::startRenderThread() {
 
     renderRunning.store(true);
     if(!renderSystem) renderSystem = std::make_unique<RenderSystem>();
+    renderSystem->clock.restart();
 
     renderThread = std::thread([this]() {
         const unsigned W = static_cast<unsigned>(map.getWidth());
@@ -171,10 +187,108 @@ void GameWorld::startRenderThread() {
                 if(event->is<sf::Event::Closed>()) {
                     window.close();
                     renderRunning.store(false);
+                    requestQuit();
+                }
+
+                if (auto key = event->getIf<sf::Event::KeyPressed>()) {
+                    using sf::Keyboard::Key;
+                    if (key->code == Key::Enter) {
+                        if (renderSystem->inputActive) {
+                            if (!renderSystem->inputBuffer.empty()) {
+                                enqueueCommand(renderSystem->inputBuffer);
+                                lastCommandInput = renderSystem->inputBuffer;
+                            }
+                            renderSystem->inputBuffer.clear();
+                            renderSystem->inputActive = false;
+                        } else {
+                            renderSystem->inputBuffer.clear();
+                            renderSystem->inputActive = true;
+                        }
+                    } else if (key->code == Key::Backspace) {
+                        if (renderSystem->inputActive && !renderSystem->inputBuffer.empty()) {
+                            renderSystem->inputBuffer.pop_back();
+                        }
+                    } else if (key->code == Key::Escape) {
+                        if (renderSystem->inputActive) {
+                            renderSystem->inputBuffer.clear();
+                            renderSystem->inputActive = false;
+                        } else {
+                            window.close();
+                            renderRunning.store(false);
+                            requestQuit();
+                        }
+                    } else if (key->code == Key::Q) {
+                        window.close();
+                        renderRunning.store(false);
+                        requestQuit();
+                    }
+                }
+
+                if (renderSystem->inputActive) {
+                    if (const auto text = event->getIf<sf::Event::TextEntered>()) {
+                        char32_t uni = text->unicode;
+                        if (uni >= 32 && uni < 127) {
+                            renderSystem->inputBuffer.push_back(static_cast<char>(uni));
+                        }
+                    }
+                }
+
+                if (const auto mouse = event->getIf<sf::Event::MouseButtonPressed>()) {
+                    auto coordOpt = renderSystem->pixelToTile(*this, window, mouse->position);
+                    if (!coordOpt) continue;
+                    Coord clicked = *coordOpt;
+
+                    if (mouse->button == sf::Mouse::Button::Left) {
+                        std::unique_lock<std::shared_mutex> lock(worldMutex);
+                        std::shared_ptr<Unit> pick;
+                        for (auto& u : unitsA) {
+                            if (u && u->isAlive() && u->getPos() == clicked) {
+                                pick = u;
+                                break;
+                            }
+                        }
+                        if (pick) {
+                            selectedUnitIds = {pick->id};
+                            lastCommandInput = "click select";
+                            lastCommandFeedback = "Selected #" + std::to_string(pick->id);
+                        }
+                    } else if (mouse->button == sf::Mouse::Button::Right) {
+                        std::unique_lock<std::shared_mutex> lock(worldMutex);
+                        if (selectedUnitIds.empty()) continue;
+
+                        std::shared_ptr<IAttackable> target;
+                        if (baseB && !baseB->isDestroyed() && baseB->getPos() == clicked) {
+                            target = baseB;
+                        }
+                        if (!target) {
+                            for (auto& u : unitsB) {
+                                if (u && u->isAlive() && u->getPos() == clicked) {
+                                    target = u;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (target) {
+                            for (int id : selectedUnitIds) {
+                                auto u = findUnit(id);
+                                if (u) u->issueAttackTarget(target);
+                            }
+                            lastCommandInput = "click attack";
+                            lastCommandFeedback = "Attack target set";
+                        } else {
+                            for (int id : selectedUnitIds) {
+                                auto u = findUnit(id);
+                                if (u) u->issueMove(clicked);
+                            }
+                            lastCommandInput = "click move";
+                            lastCommandFeedback = "Move to " + std::to_string(clicked.x) + "," + std::to_string(clicked.y);
+                        }
+                    }
                 }
             }
 
-            window.clear(sf::Color::Black);
+            window.clear(sf::Color(18, 24, 32));
             {
                 std::shared_lock<std::shared_mutex> lock(worldMutex);
                 renderSystem->renderSfml(*this, window);
@@ -212,3 +326,78 @@ void GameWorld::rebuildEnemies() {
     }
 }
 
+void GameWorld::enqueueCommand(const std::string& line) {
+    commandQueue.push(line);
+}
+
+void GameWorld::processCommands() {
+    std::string line;
+    while (commandQueue.tryPop(line)) {
+        lastCommandInput = line;
+        Command parsed;
+        std::string err;
+        if (!parseCommand(line, parsed, err)) {
+            lastCommandFeedback = "ERR: " + err;
+            continue;
+        }
+        CommandResult r = executeCommand(parsed, *this);
+        if (r.ok) {
+            lastCommandFeedback = r.normalized + " -> " + r.message;
+        } else {
+            lastCommandFeedback = "ERR: " + r.message;
+        }
+    }
+}
+
+std::shared_ptr<Unit> GameWorld::findUnit(int id) const {
+    if (id < 0) return nullptr;
+    for (auto& u : unitsA) {
+        if (u && u->id == id && u->isAlive()) return u;
+    }
+    for (auto& u : unitsB) {
+        if (u && u->id == id && u->isAlive()) return u;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Base> GameWorld::findBase(int id, Faction fac) const {
+    if (baseA && !baseA->isDestroyed() &&
+        ((id >= 0 && baseA->getId() == id) || (id < 0 && fac == Faction::A))) {
+        return baseA;
+    }
+    if (baseB && !baseB->isDestroyed() &&
+        ((id >= 0 && baseB->getId() == id) || (id < 0 && fac == Faction::B))) {
+        return baseB;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<IAttackable> GameWorld::findAttackable(int id) const {
+    if (id < 0) return nullptr;
+    auto u = findUnit(id);
+    if (u) return u;
+
+    if (baseA && baseA->getId() == id && !baseA->isDestroyed()) return baseA;
+    if (baseB && baseB->getId() == id && !baseB->isDestroyed()) return baseB;
+    return nullptr;
+}
+
+void GameWorld::setSelection(const std::vector<int>& ids) {
+    selectedUnitIds = ids;
+}
+
+void GameWorld::clearSelection() {
+    selectedUnitIds.clear();
+}
+
+int GameWorld::registerUnit(const std::shared_ptr<Unit>& u) {
+    if (!u) return -1;
+    u->id = nextUnitId++;
+    return u->id;
+}
+
+int GameWorld::registerBase(const std::shared_ptr<Base>& b) {
+    if (!b) return -1;
+    b->setId(nextBaseId++);
+    return b->getId();
+}
