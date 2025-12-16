@@ -74,7 +74,7 @@ private:
             return {true, 1.5f, -1, -1};   // 密林阻视野
 
         case TileType::HILL:
-            return {true, 2.0f, +1, +1};
+            return {true, 2.0f, +1, -1};
 
         case TileType::SWAMP:
             return {true, 2.5f, -3, -2};  // 移动极慢，攻击受限

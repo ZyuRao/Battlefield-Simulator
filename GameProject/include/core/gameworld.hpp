@@ -173,8 +173,16 @@ private:
                            Faction f);
 
     sf::Clock clock;
+    sf::Clock clickClock;
     bool inputActive = false;
     std::string inputBuffer;
+    sf::Vector2i lastClickPos{0, 0};
+    sf::Mouse::Button lastClickButton{sf::Mouse::Button::Left};
+    bool hasLastClick = false;
+    bool awaitingProductionChoice = false;
+    std::weak_ptr<Base> productionChoiceBase;
+    float doubleClickThreshold = 0.35f;
+    float doubleClickDistance = 8.f;
     friend class GameWorld;
 };
 
@@ -204,6 +212,9 @@ private:
     std::unique_ptr<RenderSystem> renderSystem;
     std::thread                   renderThread;
     std::atomic<bool>             renderRunning{false};
+    std::atomic<bool>             paused{false};
+    std::atomic<bool>             gameEnded{false};
+    std::atomic<long long>        gameEndTimestampMs{0};
 
     // --- 命令和交互状态 ---
     CommandQueue           commandQueue;
@@ -215,6 +226,12 @@ private:
     int                    nextBaseId = 1;
 
     mutable std::shared_mutex worldMutex;
+    struct ForcedReveal {
+        std::weak_ptr<IAttackable> target;
+        float                      timeLeft;
+    };
+    std::vector<ForcedReveal> forcedVisibleForA;
+    std::vector<ForcedReveal> forcedVisibleForB;
 
     
     friend class TaskPool;
@@ -235,6 +252,7 @@ public:
 
     void startRenderThread();
     void stopRenderThread();
+    void waitRenderThread();
 
 
     const BaseSystem& getBaseSystem() const { return baseSystem; }
@@ -260,6 +278,18 @@ public:
 
     bool shouldQuit() const { return quitRequested; }
     void requestQuit() { quitRequested = true; }
+    bool isRenderRunning() const { return renderRunning.load(); }
+    bool isPaused() const { return paused.load(); }
+    void pause();
+    void resume();
+    void togglePause();
+    void markGameOver();
+    bool hasGameEnded() const { return gameEnded.load(); }
+    long long gameEndMs() const { return gameEndTimestampMs.load(); }
+    void addForcedReveal(Faction viewer, const std::shared_ptr<IAttackable>& target, float durationSeconds);
+    void decayForcedReveals(float dt);
+    void appendForcedReveals(Faction viewer, std::vector<std::weak_ptr<IAttackable>>& out) const;
+    void revealAttacker(const Unit& u);
 
     int registerUnit(const std::shared_ptr<Unit>& u);
     int registerBase(const std::shared_ptr<Base>& b);

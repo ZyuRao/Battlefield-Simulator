@@ -277,14 +277,18 @@ void VisionSystem::update(GameWorld& world)
    
     for (auto& u : world.unitsA) {
         if (u->isAlive()) {
-            u->behavior->tickVision(*u, world.map, world.enemiesA);
+            std::vector<std::weak_ptr<IAttackable>> forced;
+            world.appendForcedReveals(Faction::A, forced);
+            u->behavior->tickVision(*u, world.map, world.enemiesA, forced);
         }
     }
 
     // B 阵营视野
     for (auto& u : world.unitsB) {
         if (u->isAlive()) {
-            u->behavior->tickVision(*u, world.map, world.enemiesB);
+            std::vector<std::weak_ptr<IAttackable>> forced;
+            world.appendForcedReveals(Faction::B, forced);
+            u->behavior->tickVision(*u, world.map, world.enemiesB, forced);
         }
     }
 }
@@ -294,14 +298,14 @@ void AttackSystem::update(GameWorld& world, float dt)
     // A 攻击
     for (auto& u : world.unitsA) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map, world.enemiesA);
+            u->behavior->tickAttack(*u, dt, world.map, world.enemiesA, world);
         }
     }
 
     // B 攻击
     for (auto& u : world.unitsB) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map, world.enemiesB);
+            u->behavior->tickAttack(*u, dt, world.map, world.enemiesB, world);
         }
     }
 }

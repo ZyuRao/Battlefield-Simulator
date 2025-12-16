@@ -2,6 +2,8 @@
 #include "external/FastNoiseLite.h"
 //https://github.com/Auburn/FastNoiseLite
 
+#include <cmath>
+
 
 //Map
 
@@ -178,6 +180,45 @@ void Map::findPathAStar (const Coord& start,const Coord& goal, std::vector<Coord
 
 
 
+namespace {
+bool lineHasType(const Map& map, const Coord& start, const Coord& goal, TileType type) {
+    int x0 = start.x;
+    int y0 = start.y;
+    int x1 = goal.x;
+    int y1 = goal.y;
+
+    int dx = std::abs(x1 - x0);
+    int dy = -std::abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    while (true) {
+        if (!(x0 == start.x && y0 == start.y) &&
+            !(x0 == x1 && y0 == y1)) {
+            Coord c{x0, y0};
+            if (map.inBounds(c) && map.getTile(c).getType() == type) {
+                return true;
+            }
+        }
+
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+    return false;
+}
+} // namespace
+
+bool Map::hasMountainBetween(const Coord& start, const Coord& goal) const {
+    return lineHasType(*this, start, goal, TileType::MOUNTAIN);
+}
+
+bool Map::hasRiverBetween(const Coord& start, const Coord& goal) const {
+    return lineHasType(*this, start, goal, TileType::RIVER);
+}
+
 //Mapgenerator
 
 
@@ -328,7 +369,5 @@ void MapGenerator::applySwampArdRivers(
 bool MapGenerator::validateMap(const Map& map, const Coord& baseA, const Coord& baseB) const {
     return map.isReachable(baseA, baseB);
 }
-
-
 
 

@@ -138,7 +138,8 @@ public:
     virtual void setTarget(const std::weak_ptr<IAttackable>& t) = 0;
     virtual std::weak_ptr<IAttackable> getTarget() const = 0;
     virtual void update(Unit& u, float dt, const Map& map, 
-                        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) = 0;
+                        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
+                        GameWorld& world) = 0;
     virtual std::shared_ptr<IAttackable> findNearest(const Unit& self,
                              const Map& map,
                              const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) const = 0;
@@ -164,7 +165,8 @@ public:
     std::weak_ptr<IAttackable> getTarget() const override {return target; }
     void setTarget(const std::weak_ptr<IAttackable>& t) override;
     void update(Unit& u, float dt, const Map& map,
-                const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) override;
+                const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
+                GameWorld& world) override;
 };
 
 /*====================================
@@ -175,7 +177,8 @@ public:
     virtual ~IVisionBehavior() = default;
     virtual void updateVisible(Unit& self, 
                                const Map& map,
-                               const std::vector<std::weak_ptr<IAttackable>>& enemies) = 0;
+                               const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                               const std::vector<std::weak_ptr<IAttackable>>& forcedVisible) = 0;
     virtual const std::vector<std::shared_ptr<IAttackable>>& getVisible() const = 0;
 };
 
@@ -185,7 +188,8 @@ private:
 public:
     void updateVisible(Unit& self,
                        const Map& map,
-                       const std::vector<std::weak_ptr<IAttackable>>& allEnemies) override;
+                       const std::vector<std::weak_ptr<IAttackable>>& allEnemies,
+                       const std::vector<std::weak_ptr<IAttackable>>& forcedVisible) override;
     const std::vector<std::shared_ptr<IAttackable>>& getVisible() const override;
 };
 
@@ -213,10 +217,12 @@ public:
     void onKilled(Unit& u);
 
     void tickVision(Unit& u, const Map& map, 
-                    const std::vector<std::weak_ptr<IAttackable>>& enenmies);
+                    const std::vector<std::weak_ptr<IAttackable>>& enenmies,
+                    const std::vector<std::weak_ptr<IAttackable>>& forcedVisible);
     void tickMovement(Unit& u, float dt, const Map& map);
     void tickAttack(Unit& u, float dt, const Map& map,
-        const std::vector<std::weak_ptr<IAttackable>>& visibleEnemies);
+        const std::vector<std::weak_ptr<IAttackable>>& visibleEnemies,
+        GameWorld& world);
 };
 
 
@@ -293,5 +299,3 @@ public:
 
     void update(Base& self, float dt, GameWorld& world);
 };
-
-

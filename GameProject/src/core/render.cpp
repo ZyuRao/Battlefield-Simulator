@@ -31,6 +31,7 @@ namespace {
 
 RenderSystem::RenderSystem() : fontLoaded(false) {
     clock.restart();
+    clickClock.restart();
 }
 
 void RenderSystem::ensureFontLoaded() {
@@ -444,6 +445,20 @@ void RenderSystem::drawHud(const GameWorld& world,
     text.setPosition(sf::Vector2f{ x, y });
     window.draw(text);
     y += 30.f;
+
+    if (world.isPaused()) {
+        text.setFillColor(sf::Color(230, 200, 120));
+        text.setString("Status: Paused");
+        text.setPosition(sf::Vector2f{ x, y });
+        window.draw(text);
+        y += 24.f;
+    } else if (awaitingProductionChoice) {
+        text.setFillColor(sf::Color(200, 180, 120));
+        text.setString("Select production (L/R/M)");
+        text.setPosition(sf::Vector2f{ x, y });
+        window.draw(text);
+        y += 24.f;
+    }
 
     // 阵营 A
     text.setFillColor(factionColor(Faction::A));

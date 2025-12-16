@@ -141,7 +141,8 @@ void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
 }
 
 void DefaultVisionBehavior::updateVisible(Unit& self, const Map& map,
-                                          const std::vector<std::weak_ptr<IAttackable>>& allEnemies)
+                                          const std::vector<std::weak_ptr<IAttackable>>& allEnemies,
+                                          const std::vector<std::weak_ptr<IAttackable>>& forcedVisible)
 {
     visible.clear();
 
@@ -161,6 +162,14 @@ void DefaultVisionBehavior::updateVisible(Unit& self, const Map& map,
             visible.push_back(e);
         }
     }
+
+    for (const auto& w : forcedVisible) {
+        auto e = w.lock();
+        if (!e || e->isDestroyed()) continue;
+        if (std::find(visible.begin(), visible.end(), e) == visible.end()) {
+            visible.push_back(e);
+        }
+    }
 }
 
 const std::vector<std::shared_ptr<IAttackable>>& DefaultVisionBehavior::getVisible() const {
@@ -168,7 +177,8 @@ const std::vector<std::shared_ptr<IAttackable>>& DefaultVisionBehavior::getVisib
 }
 
 void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
-        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) {
+        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
+        GameWorld& world) {
     if(cd > 0) cd -= dt;
 
     std::shared_ptr<IAttackable> cur = target.lock();
@@ -199,9 +209,18 @@ void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
 
     if(inAttackRange(u, map, cur)) {
         if(cd <= 0.f) {
-            float dmg = u.baseStats.attack + map.getTile(u.pos).getAttackBonus();
+            const Tile& tile = map.getTile(u.pos);
+            float dmg = u.baseStats.attack + tile.getAttackBonus();
+            float cdBase = 0.8f;
+
+            if (tile.getType() == TileType::HILL) {
+                dmg *= 0.85f;
+                cdBase *= 1.25f;
+            }
+
             cur->takeDamage(dmg);
-            cd = 0.8f;
+            world.revealAttacker(u);
+            cd = cdBase;
         }
     }
 }
@@ -247,7 +266,14 @@ bool DefaultAttackBehavior::inAttackRange(
     const Tile& tile = map.getTile(self.pos);
     float effectiveRange = self.baseStats.attackRange + tile.getVisionBonus();
     float dist = self.pos.mhtDistanceTo(t->getPos());
-    return dist <= effectiveRange;
+    if (dist > effectiveRange) return false;
+
+    if (map.hasMountainBetween(self.pos, t->getPos())) return false;
+    if (self.baseStats.attackRange <= 2.0f &&
+        map.hasRiverBetween(self.pos, t->getPos())) {
+        return false;
+    }
+    return true;
 }
 
 UnitBehavior::UnitBehavior() {
@@ -275,10 +301,11 @@ void UnitBehavior::onKilled(Unit& u) {
 
 void UnitBehavior::tickVision(
     Unit& u, const Map& map, 
-    const std::vector<std::weak_ptr<IAttackable>>& enemies
+    const std::vector<std::weak_ptr<IAttackable>>& enemies,
+    const std::vector<std::weak_ptr<IAttackable>>& forcedVisible
 ) {
     if(isDead()) return;
-    vision->updateVisible(u, map, enemies);
+    vision->updateVisible(u, map, enemies, forcedVisible);
 }
 
 void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
@@ -297,7 +324,8 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
 
 void UnitBehavior::tickAttack(
     Unit& u, float dt, const Map& map,
-    const std::vector<std::weak_ptr<IAttackable>>& enemies
+    const std::vector<std::weak_ptr<IAttackable>>& enemies,
+    GameWorld& world
 ) {
     if(isDead()) return;
 
@@ -320,14 +348,16 @@ void UnitBehavior::tickAttack(
 
     command->clear();
 
-    vision->updateVisible(u, map, enemies);
+    std::vector<std::weak_ptr<IAttackable>> forcedVisible;
+    world.appendForcedReveals(u.owner, forcedVisible);
+    vision->updateVisible(u, map, enemies, forcedVisible);
     const auto& visible = vision->getVisible();
 
     UnitState st = stateMachine->get();
 
     switch(st) {
         case UnitState::Idle: {
-            attack->update(u, dt, map, visible);
+            attack->update(u, dt, map, visible, world);
             auto tWeak = attack->getTarget();
             if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);
@@ -340,7 +370,7 @@ void UnitBehavior::tickAttack(
             break;
         }     
         case UnitState::Attacking: {
-            attack->update(u, dt, map, visible);
+            attack->update(u, dt, map, visible, world);
             auto t = attack->getTarget().lock();
             if(!t || t->isDestroyed()) {
                 stateMachine->set(UnitState::Idle);
@@ -376,7 +406,7 @@ void UnitBehavior::tickAttack(
             break;
         }  
         case UnitState::Wandering: {
-            attack->update(u, dt, map, visible);
+            attack->update(u, dt, map, visible, world);
             auto tWeak = attack->getTarget();
             if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);

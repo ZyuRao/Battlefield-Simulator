@@ -113,7 +113,12 @@ void GameWorld::update() {
     // std::cout << "  dt=" << dt << "\n";
 
     processCommands();
+    if (paused.load() || gameEnded.load()) {
+        timeManager.reset();
+        return;
+    }
 
+    decayForcedReveals(dt);
     // std::cout << "  BaseSystem...\n";
     baseSystem.update(*this, dt);
     rebuildEnemies();
@@ -180,8 +185,16 @@ void GameWorld::startRenderThread() {
             "Battlefield Simulator",
             sf::Style::Titlebar | sf::Style::Close
         );
+        window.setPosition(sf::Vector2i{60, 60});
         window.setFramerateLimit(60);
-        while(renderRunning.load() || window.isOpen()) {
+        auto shutdownStart = std::chrono::steady_clock::time_point{};
+        bool shutdownArmed = false;
+        while(renderRunning.load()) {
+            if (!window.isOpen()) {
+                renderRunning.store(false);
+                requestQuit();
+                break;
+            }
 
             while(const std::optional event = window.pollEvent()) {
                 if(event->is<sf::Event::Closed>()) {
@@ -221,6 +234,10 @@ void GameWorld::startRenderThread() {
                         window.close();
                         renderRunning.store(false);
                         requestQuit();
+                    } else if (key->code == Key::P) {
+                        togglePause();
+                        lastCommandInput = "toggle pause";
+                        lastCommandFeedback = paused.load() ? "Paused" : "Resumed";
                     }
                 }
 
@@ -234,9 +251,83 @@ void GameWorld::startRenderThread() {
                 }
 
                 if (const auto mouse = event->getIf<sf::Event::MouseButtonPressed>()) {
+                    // 生产选择优先处理
+                    if (renderSystem->awaitingProductionChoice) {
+                        std::unique_lock<std::shared_mutex> lock(worldMutex);
+                        auto basePtr = renderSystem->productionChoiceBase.lock();
+                        renderSystem->awaitingProductionChoice = false;
+                        renderSystem->productionChoiceBase.reset();
+
+                        std::optional<UnitType> chosen;
+                        if (mouse->button == sf::Mouse::Button::Left) chosen = UnitType::Infantry;
+                        else if (mouse->button == sf::Mouse::Button::Right) chosen = UnitType::Archer;
+                        else if (mouse->button == sf::Mouse::Button::Middle) chosen = UnitType::Knight;
+
+                        if (basePtr && chosen.has_value()) {
+                            basePtr->issueProduce(*chosen);
+                            pause();
+                            lastCommandInput = "mouse production";
+                            lastCommandFeedback = "生产 " +
+                                std::string(*chosen == UnitType::Infantry ? "Infantry" :
+                                            *chosen == UnitType::Archer   ? "Archer"   : "Knight");
+                        } else {
+                            lastCommandInput = "mouse production";
+                            lastCommandFeedback = "生产取消";
+                        }
+                        continue;
+                    }
+
+                    // 双击检测
+                    bool isDouble = false;
+                    {
+                        float since = renderSystem->clickClock.getElapsedTime().asSeconds();
+                        sf::Vector2i pos = mouse->position;
+                        int dx = pos.x - renderSystem->lastClickPos.x;
+                        int dy = pos.y - renderSystem->lastClickPos.y;
+                        float dist2 = static_cast<float>(dx * dx + dy * dy);
+                        if (renderSystem->hasLastClick &&
+                            mouse->button == renderSystem->lastClickButton &&
+                            since <= renderSystem->doubleClickThreshold &&
+                            dist2 <= renderSystem->doubleClickDistance * renderSystem->doubleClickDistance) {
+                            isDouble = true;
+                        }
+                        renderSystem->lastClickPos = pos;
+                        renderSystem->lastClickButton = mouse->button;
+                        renderSystem->hasLastClick = true;
+                        renderSystem->clickClock.restart();
+                    }
+
                     auto coordOpt = renderSystem->pixelToTile(*this, window, mouse->position);
+
+                    if (mouse->button == sf::Mouse::Button::Middle && !isDouble) {
+                        togglePause();
+                        lastCommandInput = "mouse pause";
+                        lastCommandFeedback = paused.load() ? "Paused" : "Resumed";
+                        continue;
+                    }
+
                     if (!coordOpt) continue;
                     Coord clicked = *coordOpt;
+
+                    if (isDouble) {
+                        std::shared_ptr<Base> baseTarget;
+                        {
+                            std::shared_lock<std::shared_mutex> lock(worldMutex);
+                            if (baseA && !baseA->isDestroyed() && baseA->getPos() == clicked) {
+                                baseTarget = baseA;
+                            } else if (baseB && !baseB->isDestroyed() && baseB->getPos() == clicked) {
+                                baseTarget = baseB;
+                            }
+                        }
+                        if (baseTarget) {
+                            renderSystem->awaitingProductionChoice = true;
+                            renderSystem->productionChoiceBase = baseTarget;
+                            pause();
+                            lastCommandInput = "double click base";
+                            lastCommandFeedback = "选择生产：左-Infantry 右-Archer 中键-Knight";
+                            continue;
+                        }
+                    }
 
                     if (mouse->button == sf::Mouse::Button::Left) {
                         std::unique_lock<std::shared_mutex> lock(worldMutex);
@@ -249,6 +340,7 @@ void GameWorld::startRenderThread() {
                         }
                         if (pick) {
                             selectedUnitIds = {pick->id};
+                            pause();
                             lastCommandInput = "click select";
                             lastCommandFeedback = "Selected #" + std::to_string(pick->id);
                         }
@@ -274,6 +366,7 @@ void GameWorld::startRenderThread() {
                                 auto u = findUnit(id);
                                 if (u) u->issueAttackTarget(target);
                             }
+                            pause();
                             lastCommandInput = "click attack";
                             lastCommandFeedback = "Attack target set";
                         } else {
@@ -281,11 +374,35 @@ void GameWorld::startRenderThread() {
                                 auto u = findUnit(id);
                                 if (u) u->issueMove(clicked);
                             }
+                            pause();
                             lastCommandInput = "click move";
                             lastCommandFeedback = "Move to " + std::to_string(clicked.x) + "," + std::to_string(clicked.y);
                         }
                     }
                 }
+            }
+
+            if (!shutdownArmed && gameEnded.load()) {
+                shutdownArmed = true;
+                auto ms = gameEndTimestampMs.load();
+                if (ms > 0) {
+                    shutdownStart = std::chrono::steady_clock::time_point(std::chrono::milliseconds(ms));
+                } else {
+                    shutdownStart = std::chrono::steady_clock::now();
+                }
+            }
+
+            if (shutdownArmed) {
+                auto elapsed = std::chrono::steady_clock::now() - shutdownStart;
+                if (elapsed >= std::chrono::seconds(5)) {
+                    window.close();
+                    renderRunning.store(false);
+                    requestQuit();
+                }
+            }
+
+            if (!renderRunning.load() || !window.isOpen()) {
+                continue;
             }
 
             window.clear(sf::Color(18, 24, 32));
@@ -299,8 +416,6 @@ void GameWorld::startRenderThread() {
 }
 
 void GameWorld::stopRenderThread() {
-    if(!renderRunning.load()) return;
-
     renderRunning.store(false);
     if(renderThread.joinable()) {
         renderThread.join();
@@ -400,4 +515,69 @@ int GameWorld::registerBase(const std::shared_ptr<Base>& b) {
     if (!b) return -1;
     b->setId(nextBaseId++);
     return b->getId();
+}
+
+void GameWorld::pause() {
+    paused.store(true);
+}
+
+void GameWorld::resume() {
+    paused.store(false);
+}
+
+void GameWorld::togglePause() {
+    if (paused.load()) {
+        resume();
+    } else {
+        pause();
+    }
+}
+
+void GameWorld::markGameOver() {
+    gameEnded.store(true);
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    gameEndTimestampMs.store(nowMs);
+    pause();
+}
+
+void GameWorld::addForcedReveal(Faction viewer, const std::shared_ptr<IAttackable>& target, float durationSeconds) {
+    if (!target) return;
+    auto& bucket = (viewer == Faction::A) ? forcedVisibleForA : forcedVisibleForB;
+    bucket.push_back({target, durationSeconds});
+}
+
+void GameWorld::decayForcedReveals(float dt) {
+    auto decay = [&](std::vector<ForcedReveal>& arr) {
+        for (auto& r : arr) r.timeLeft -= dt;
+        arr.erase(std::remove_if(arr.begin(), arr.end(),
+                                 [](const ForcedReveal& r) {
+                                     return r.timeLeft <= 0.f || r.target.expired();
+                                 }),
+                  arr.end());
+    };
+    decay(forcedVisibleForA);
+    decay(forcedVisibleForB);
+}
+
+void GameWorld::appendForcedReveals(Faction viewer, std::vector<std::weak_ptr<IAttackable>>& out) const {
+    const auto& bucket = (viewer == Faction::A) ? forcedVisibleForA : forcedVisibleForB;
+    for (const auto& r : bucket) {
+        if (!r.target.expired()) {
+            out.push_back(r.target);
+        }
+    }
+}
+
+void GameWorld::revealAttacker(const Unit& u) {
+    auto attacker = findUnit(u.id);
+    if (!attacker) return;
+    Faction viewer = (u.owner == Faction::A) ? Faction::B : Faction::A;
+    addForcedReveal(viewer, attacker, 2.0f);
+}
+
+void GameWorld::waitRenderThread() {
+    if (renderThread.joinable()) {
+        renderThread.join();
+    }
 }

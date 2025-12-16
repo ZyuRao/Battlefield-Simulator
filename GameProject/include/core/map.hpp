@@ -34,6 +34,8 @@ public:
     void findPathAStar(const Coord& start,
                    const Coord& goal,
                    std::vector<Coord>& outPath) const;
+    bool hasMountainBetween(const Coord& start, const Coord& goal) const;
+    bool hasRiverBetween(const Coord& start, const Coord& goal) const;
 
     // void print() const;
 

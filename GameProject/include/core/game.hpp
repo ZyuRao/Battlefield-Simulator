@@ -59,10 +59,14 @@ public:
             }
         }
 
-        world.stopRenderThread();
+        world.markGameOver();
         inputRunning.store(false);
         if (inputThread.joinable()) {
             inputThread.join();
         }
+        if (world.isRenderRunning()) {
+            world.waitRenderThread();
+        }
+        world.stopRenderThread();
     }
 };
