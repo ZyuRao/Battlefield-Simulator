@@ -44,10 +44,24 @@ public:
             }
         });
         
+        constexpr double fixedHz = 120.0;
+        constexpr double fixedDt = 1.0 / fixedHz;
+        double accumulator = 0.0;
+        auto lastTime = std::chrono::steady_clock::now();
+        // TODO(perf): If simulation falls behind, consider batching or reducing system costs.
         while(running) {
-            world.update();
+            auto now = std::chrono::steady_clock::now();
+            std::chrono::duration<double> frameTime = now - lastTime;
+            lastTime = now;
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            double delta = frameTime.count();
+            if (delta > 0.25) delta = 0.25;
+            accumulator += delta;
+
+            while (accumulator >= fixedDt) {
+                world.update(static_cast<float>(fixedDt));
+                accumulator -= fixedDt;
+            }
 
             if(world.shouldQuit()) {
                 running = false;
@@ -57,6 +71,8 @@ public:
                 std::string winner = !world.baseA->isDestroyed() ? "A" : "B";
                 std::cout << "Winner:" << winner << std::endl;
             }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         world.markGameOver();

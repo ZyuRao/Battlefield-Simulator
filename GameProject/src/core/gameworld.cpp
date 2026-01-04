@@ -1,11 +1,14 @@
 #include "core/Iattackable.hpp"
 #include "core/gameworld.hpp"
+#include "core/render_config.hpp"
 #include <chrono>
 #include <algorithm>
 #include <iostream>
 #include <SFML/Graphics.hpp>
 #include <optional>
 #include <unordered_set>
+#include <cmath>
+#include <cctype>
 
 
 namespace {
@@ -102,19 +105,16 @@ GameWorld::~GameWorld() {
     stopRenderThread();
 }
 
-void GameWorld::update() {
+void GameWorld::update(float dt) {
     static int tick = 0;
     ++tick;
     // std::cout << "\n[World] Tick " << tick << "\n";
 
     std::unique_lock<std::shared_mutex> lock(worldMutex);
-    timeManager.tick();
-    float dt = timeManager.getDeltaTime();
     // std::cout << "  dt=" << dt << "\n";
 
     processCommands();
     if (paused.load() || gameEnded.load()) {
-        timeManager.reset();
         return;
     }
 
@@ -176,12 +176,38 @@ void GameWorld::startRenderThread() {
         const unsigned W = static_cast<unsigned>(map.getWidth());
         const unsigned H = static_cast<unsigned>(map.getHeight());
 
-        const unsigned tile = 26;     // 你想要的视觉密度
         const unsigned hud  = 260;
         const unsigned pad  = 40;
 
+        const sf::VideoMode desktop = sf::VideoMode::getDesktopMode();
+        const float maxW = std::floor(static_cast<float>(desktop.size.x) * 0.9f);
+        const float maxH = std::floor(static_cast<float>(desktop.size.y) * 0.9f);
+
+        const float mapMaxW = std::max(0.f, maxW - static_cast<float>(hud + pad));
+        const float mapMaxH = std::max(0.f, maxH - static_cast<float>(pad));
+
+        int tileSize = RenderConfig::TILE_SIZE;
+        if (static_cast<float>(tileSize) * W > mapMaxW ||
+            static_cast<float>(tileSize) * H > mapMaxH) {
+            float fit = std::floor(std::min(mapMaxW / static_cast<float>(W),
+                                            mapMaxH / static_cast<float>(H)));
+            int tileFit = std::max(static_cast<int>(fit), 24);
+            if (tileFit >= RenderConfig::NATIVE_TILE_SIZE) tileSize = RenderConfig::NATIVE_TILE_SIZE;
+            else if (tileFit >= 48) tileSize = 48;
+            else if (tileFit >= 32) tileSize = 32;
+            else tileSize = tileFit;
+        }
+        RenderConfig::TILE_SIZE = tileSize;
+
+        const float mapPixelW = static_cast<float>(tileSize) * W;
+        const float mapPixelH = static_cast<float>(tileSize) * H;
+        const unsigned winW = static_cast<unsigned>(
+            std::floor(std::min(mapPixelW + hud + pad, maxW)));
+        const unsigned winH = static_cast<unsigned>(
+            std::floor(std::min(mapPixelH + pad, maxH)));
+
         sf::RenderWindow window(
-            sf::VideoMode({hud + pad + tile * W, pad + tile * H}),
+            sf::VideoMode({winW, winH}),
             "Battlefield Simulator",
             sf::Style::Titlebar | sf::Style::Close
         );
@@ -205,6 +231,29 @@ void GameWorld::startRenderThread() {
 
                 if (auto key = event->getIf<sf::Event::KeyPressed>()) {
                     using sf::Keyboard::Key;
+
+                    if (awaitingProductionChoice) {
+                        if (key->code == Key::Backspace) {
+                            handleProductionBackspace();
+                            continue;
+                        }
+                        if (key->code == Key::P) {
+                            cancelProductionChoice();
+                            resume();
+                            lastCommandInput = "production cancel (P)";
+                            continue;
+                        }
+                        if (key->code == Key::Enter) {
+                            commitProductionChoice();
+                            continue;
+                        }
+                        if (key->code == Key::Escape) {
+                            cancelProductionChoice();
+                            resume();
+                            continue;
+                        }
+                    }
+
                     if (key->code == Key::Enter) {
                         if (renderSystem->inputActive) {
                             if (!renderSystem->inputBuffer.empty()) {
@@ -241,65 +290,31 @@ void GameWorld::startRenderThread() {
                     }
                 }
 
-                if (renderSystem->inputActive) {
+                if (renderSystem->inputActive && !awaitingProductionChoice) {
                     if (const auto text = event->getIf<sf::Event::TextEntered>()) {
                         char32_t uni = text->unicode;
                         if (uni >= 32 && uni < 127) {
                             renderSystem->inputBuffer.push_back(static_cast<char>(uni));
                         }
                     }
+                } else if (awaitingProductionChoice) {
+                    if (const auto text = event->getIf<sf::Event::TextEntered>()) {
+                        char32_t uni = text->unicode;
+                        if (uni >= U'0' && uni <= U'9') {
+                            handleProductionDigit(static_cast<char>(uni));
+                        }
+                    }
                 }
 
                 if (const auto mouse = event->getIf<sf::Event::MouseButtonPressed>()) {
-                    // 生产选择优先处理
-                    if (renderSystem->awaitingProductionChoice) {
-                        std::unique_lock<std::shared_mutex> lock(worldMutex);
-                        auto basePtr = renderSystem->productionChoiceBase.lock();
-                        renderSystem->awaitingProductionChoice = false;
-                        renderSystem->productionChoiceBase.reset();
-
-                        std::optional<UnitType> chosen;
-                        if (mouse->button == sf::Mouse::Button::Left) chosen = UnitType::Infantry;
-                        else if (mouse->button == sf::Mouse::Button::Right) chosen = UnitType::Archer;
-                        else if (mouse->button == sf::Mouse::Button::Middle) chosen = UnitType::Knight;
-
-                        if (basePtr && chosen.has_value()) {
-                            basePtr->issueProduce(*chosen);
-                            pause();
-                            lastCommandInput = "mouse production";
-                            lastCommandFeedback = "生产 " +
-                                std::string(*chosen == UnitType::Infantry ? "Infantry" :
-                                            *chosen == UnitType::Archer   ? "Archer"   : "Knight");
-                        } else {
-                            lastCommandInput = "mouse production";
-                            lastCommandFeedback = "生产取消";
-                        }
+                    if (awaitingProductionChoice && mouse->button != sf::Mouse::Button::Middle) {
+                        // 忽略其他鼠标操作，保持选择流程
                         continue;
-                    }
-
-                    // 双击检测
-                    bool isDouble = false;
-                    {
-                        float since = renderSystem->clickClock.getElapsedTime().asSeconds();
-                        sf::Vector2i pos = mouse->position;
-                        int dx = pos.x - renderSystem->lastClickPos.x;
-                        int dy = pos.y - renderSystem->lastClickPos.y;
-                        float dist2 = static_cast<float>(dx * dx + dy * dy);
-                        if (renderSystem->hasLastClick &&
-                            mouse->button == renderSystem->lastClickButton &&
-                            since <= renderSystem->doubleClickThreshold &&
-                            dist2 <= renderSystem->doubleClickDistance * renderSystem->doubleClickDistance) {
-                            isDouble = true;
-                        }
-                        renderSystem->lastClickPos = pos;
-                        renderSystem->lastClickButton = mouse->button;
-                        renderSystem->hasLastClick = true;
-                        renderSystem->clickClock.restart();
                     }
 
                     auto coordOpt = renderSystem->pixelToTile(*this, window, mouse->position);
 
-                    if (mouse->button == sf::Mouse::Button::Middle && !isDouble) {
+                    if (mouse->button == sf::Mouse::Button::Middle) {
                         togglePause();
                         lastCommandInput = "mouse pause";
                         lastCommandFeedback = paused.load() ? "Paused" : "Resumed";
@@ -309,28 +324,19 @@ void GameWorld::startRenderThread() {
                     if (!coordOpt) continue;
                     Coord clicked = *coordOpt;
 
-                    if (isDouble) {
-                        std::shared_ptr<Base> baseTarget;
-                        {
-                            std::shared_lock<std::shared_mutex> lock(worldMutex);
-                            if (baseA && !baseA->isDestroyed() && baseA->getPos() == clicked) {
-                                baseTarget = baseA;
-                            } else if (baseB && !baseB->isDestroyed() && baseB->getPos() == clicked) {
-                                baseTarget = baseB;
-                            }
-                        }
-                        if (baseTarget) {
-                            renderSystem->awaitingProductionChoice = true;
-                            renderSystem->productionChoiceBase = baseTarget;
-                            pause();
-                            lastCommandInput = "double click base";
-                            lastCommandFeedback = "选择生产：左-Infantry 右-Archer 中键-Knight";
-                            continue;
-                        }
-                    }
-
                     if (mouse->button == sf::Mouse::Button::Left) {
                         std::unique_lock<std::shared_mutex> lock(worldMutex);
+                        std::shared_ptr<Base> baseTarget;
+                        if (baseA && !baseA->isDestroyed() && baseA->getPos() == clicked) {
+                            baseTarget = baseA;
+                        } else if (baseB && !baseB->isDestroyed() && baseB->getPos() == clicked) {
+                            baseTarget = baseB;
+                        }
+                        if (baseTarget) {
+                            beginProductionChoice(baseTarget);
+                            continue;
+                        }
+
                         std::shared_ptr<Unit> pick;
                         for (auto& u : unitsA) {
                             if (u && u->isAlive() && u->getPos() == clicked) {
@@ -420,6 +426,100 @@ void GameWorld::stopRenderThread() {
     if(renderThread.joinable()) {
         renderThread.join();
     }
+}
+
+std::optional<UnitType> GameWorld::unitTypeFromCode(int code) const {
+    if (code < 0) return std::nullopt;
+    // Extend this list in order (1,2,3,...) to add more unit codes.
+    static const std::vector<UnitType> mapping = {
+        UnitType::Infantry,
+        UnitType::Archer,
+        UnitType::Knight
+    };
+
+    if (code >= 1 && code <= static_cast<int>(mapping.size())) {
+        return mapping[static_cast<std::size_t>(code - 1)];
+    }
+    return std::nullopt;
+}
+
+void GameWorld::beginProductionChoice(const std::shared_ptr<Base>& base) {
+    if (!base) return;
+    awaitingProductionChoice = true;
+    productionChoiceBase = base;
+    productionInputBuffer.clear();
+    pause();
+    lastCommandInput = "production choice";
+    lastCommandFeedback = "Enter unit code (1=Infantry, 2=Archer, 3=Knight) then press Enter; Esc to cancel";
+}
+
+bool GameWorld::handleProductionDigit(char digit) {
+    if (!std::isdigit(static_cast<unsigned char>(digit))) return false;
+    productionInputBuffer.push_back(digit);
+    lastCommandFeedback = "Production code: " + productionInputBuffer + " (Enter to confirm)";
+    return true;
+}
+
+bool GameWorld::handleProductionBackspace() {
+    if (productionInputBuffer.empty()) return false;
+    productionInputBuffer.pop_back();
+    lastCommandFeedback = productionInputBuffer.empty()
+        ? "Production code cleared"
+        : "Production code: " + productionInputBuffer;
+    return true;
+}
+
+bool GameWorld::commitProductionChoice() {
+    auto basePtr = productionChoiceBase.lock();
+    if (!basePtr) {
+        cancelProductionChoice();
+        return false;
+    }
+
+    if (productionInputBuffer.empty()) {
+        lastCommandFeedback = "Please enter a numeric code";
+        return false;
+    }
+
+    auto ignoreInvalid = [&](const std::string& msg) {
+        awaitingProductionChoice = false;
+        productionChoiceBase.reset();
+        productionInputBuffer.clear();
+        resume();
+        lastCommandFeedback = msg;
+    };
+
+    int code = -1;
+    try {
+        code = std::stoi(productionInputBuffer);
+    } catch (...) {
+        ignoreInvalid("Invalid code, ignored");
+        return false;
+    }
+
+    auto type = unitTypeFromCode(code);
+    if (!type.has_value()) {
+        ignoreInvalid("Unsupported code ignored: " + productionInputBuffer);
+        return false;
+    }
+
+    basePtr->issueProduce(*type);
+    lastCommandFeedback = "Queued " +
+        std::string(*type == UnitType::Infantry ? "Infantry" :
+                    *type == UnitType::Archer   ? "Archer"   : "Knight");
+    awaitingProductionChoice = false;
+    productionChoiceBase.reset();
+    productionInputBuffer.clear();
+    resume();
+    return true;
+}
+
+void GameWorld::cancelProductionChoice() {
+    awaitingProductionChoice = false;
+    productionChoiceBase.reset();
+    productionInputBuffer.clear();
+    lastCommandFeedback = "Production canceled";
+    resume();
 }
 
 void GameWorld::rebuildEnemies() {

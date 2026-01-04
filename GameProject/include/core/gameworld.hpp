@@ -11,6 +11,9 @@
 #include <shared_mutex>
 #include <cassert>
 #include <optional>
+#include <array>
+#include <cstddef>
+#include <unordered_map>
 #ifdef _WIN32
     #include <windows.h>
 #endif
@@ -117,9 +120,40 @@ private:
 
     sf::Font hudFont;
     bool fontLoaded = false;
+    sf::Texture tilesheetTexture;
+    sf::Texture spritesheetTexture;
+    bool texturesLoaded = false;
+
+    static constexpr std::size_t kTileTypeCount = 6;
+    static constexpr std::size_t kUnitTypeCount = 3;
+    struct TileAtlas {
+        sf::IntRect grass{};
+        sf::IntRect grassAlt{};
+        sf::IntRect dirt{};
+        sf::IntRect sand{};
+        sf::IntRect stone{};
+        sf::IntRect water{};
+        sf::IntRect waterAlt{};
+        sf::IntRect snow{};
+        sf::IntRect ice{};
+        sf::IntRect mountain{};
+        sf::IntRect forest{};
+    };
+    TileAtlas tileAtlas{};
+    std::array<sf::IntRect, kTileTypeCount> tileRects{};
+    std::array<sf::IntRect, kUnitTypeCount> unitRects{};
+    sf::IntRect baseRect{};
+    std::unordered_map<std::string, sf::IntRect> spriteRects;
 
     // 工具函数
     void ensureFontLoaded();
+    void loadTextures();
+    void initAtlasMapping();
+    sf::IntRect tilesheetRect(int col, int row) const;
+    sf::IntRect tileRectFor(TileType t) const;
+    sf::IntRect unitRectFor(UnitType t) const;
+    sf::Vector2f tileTopLeft(const Layout& layout, const Coord& c) const;
+    sf::Vector2f tileCenter(const Layout& layout, const Coord& c) const;
 
     Layout   computeLayout(const GameWorld& world,
                            const sf::RenderWindow& window) const;
@@ -171,18 +205,15 @@ private:
                            sf::Vector2f center,
                            float radius,
                            Faction f);
+    void drawFactionRing(sf::RenderWindow& window,
+                         sf::Vector2f center,
+                         float radius,
+                         float thickness,
+                         Faction f);
 
     sf::Clock clock;
-    sf::Clock clickClock;
     bool inputActive = false;
     std::string inputBuffer;
-    sf::Vector2i lastClickPos{0, 0};
-    sf::Mouse::Button lastClickButton{sf::Mouse::Button::Left};
-    bool hasLastClick = false;
-    bool awaitingProductionChoice = false;
-    std::weak_ptr<Base> productionChoiceBase;
-    float doubleClickThreshold = 0.35f;
-    float doubleClickDistance = 8.f;
     friend class GameWorld;
 };
 
@@ -224,6 +255,9 @@ private:
     bool                   quitRequested = false;
     int                    nextUnitId = 1;
     int                    nextBaseId = 1;
+    bool                   awaitingProductionChoice = false;
+    std::weak_ptr<Base>    productionChoiceBase;
+    std::string            productionInputBuffer;
 
     mutable std::shared_mutex worldMutex;
     struct ForcedReveal {
@@ -248,7 +282,7 @@ public:
     GameWorld();
     ~GameWorld();
     
-    void update();
+    void update(float dt);
 
     void startRenderThread();
     void stopRenderThread();
@@ -290,6 +324,12 @@ public:
     void decayForcedReveals(float dt);
     void appendForcedReveals(Faction viewer, std::vector<std::weak_ptr<IAttackable>>& out) const;
     void revealAttacker(const Unit& u);
+    void beginProductionChoice(const std::shared_ptr<Base>& base);
+    bool handleProductionDigit(char digit);
+    bool handleProductionBackspace();
+    bool commitProductionChoice();
+    void cancelProductionChoice();
+    std::optional<UnitType> unitTypeFromCode(int code) const;
 
     int registerUnit(const std::shared_ptr<Unit>& u);
     int registerBase(const std::shared_ptr<Base>& b);

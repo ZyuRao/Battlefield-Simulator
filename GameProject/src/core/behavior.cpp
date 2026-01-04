@@ -508,21 +508,19 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
 
     switch(st) {
         case BaseState::Idle: {
-            // 检查是否有生产命令
-            if (command->hasPending()) {
-                UnitType t = command->nextPending();
-                command->pop();
+            // Shared cooldown for both queued commands and periodic rotation
+            if (!periodic->triggered(dt)) break;
 
-                spawn->begin(t, self);
-                stateMachine->set(BaseState::Producing);
-                break;
+            UnitType t;
+            if (command->hasPending()) {
+                t = command->nextPending();
+                command->pop();
+            } else {
+                t = periodic->nextType();
             }
-            
-            if(periodic->triggered(dt)) {
-                UnitType t = periodic->nextType();
-                spawn->begin(t, self);
-                stateMachine->set(BaseState::Producing);
-            }
+
+            spawn->begin(t, self);
+            stateMachine->set(BaseState::Producing);
             break;
         }
 

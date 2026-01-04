@@ -1,13 +1,31 @@
 #include "core/gameworld.hpp"
+#include "core/render_config.hpp"
 #include <iostream>
 #include <string>
 #include <optional>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <unordered_map>
+#include <vector>
 
 
 namespace {
+    std::filesystem::path resolveAssetPath(const std::filesystem::path& relative) {
+        std::filesystem::path base = std::filesystem::current_path();
+        for (int i = 0; i < 4; ++i) {
+            auto candidate = base / relative;
+            if (std::filesystem::exists(candidate)) {
+                return candidate;
+            }
+            if (!base.has_parent_path()) break;
+            base = base.parent_path();
+        }
+        return relative;
+    }
+
     void clearScreen() {
         #ifdef _WIN32
             HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -27,20 +45,163 @@ namespace {
             std::cout << "\x1b[2J\x1b[H";
         #endif
     }
+
+    std::optional<std::string> extractAttr(const std::string& line,
+                                           const std::string& key) {
+        const std::string token = key + "=\"";
+        const auto start = line.find(token);
+        if (start == std::string::npos) return std::nullopt;
+        const auto valueStart = start + token.size();
+        const auto valueEnd = line.find('"', valueStart);
+        if (valueEnd == std::string::npos) return std::nullopt;
+        return line.substr(valueStart, valueEnd - valueStart);
+    }
+
+    std::unordered_map<std::string, sf::IntRect> loadSpritesheetRects(
+        const std::filesystem::path& xmlPath) {
+        std::unordered_map<std::string, sf::IntRect> rects;
+        std::ifstream file(xmlPath);
+        if (!file.is_open()) {
+            std::cerr << "[RenderSystem] Failed to open spritesheet XML: "
+                      << xmlPath << "\n";
+            return rects;
+        }
+
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.find("SubTexture") == std::string::npos) continue;
+            auto name = extractAttr(line, "name");
+            auto xStr = extractAttr(line, "x");
+            auto yStr = extractAttr(line, "y");
+            auto wStr = extractAttr(line, "width");
+            auto hStr = extractAttr(line, "height");
+            if (!name || !xStr || !yStr || !wStr || !hStr) continue;
+            try {
+                int x = std::stoi(*xStr);
+                int y = std::stoi(*yStr);
+                int w = std::stoi(*wStr);
+                int h = std::stoi(*hStr);
+                rects.emplace(*name, sf::IntRect{{x, y}, {w, h}});
+            } catch (const std::exception&) {
+                continue;
+            }
+        }
+
+        return rects;
+    }
 }
 
 RenderSystem::RenderSystem() : fontLoaded(false) {
     clock.restart();
-    clickClock.restart();
+    initAtlasMapping();
+    loadTextures();
 }
 
 void RenderSystem::ensureFontLoaded() {
     if(fontLoaded) return;
-    if(hudFont.openFromFile("./assets/NotoSansMono-VariableFont_wdth,wght.ttf")) {
+    auto path = resolveAssetPath("assets/NotoSansMono-VariableFont_wdth,wght.ttf");
+    if(hudFont.openFromFile(path.string())) {
         fontLoaded = true;
     } else {
         fontLoaded = false;
     }
+}
+
+void RenderSystem::loadTextures() {
+    if (texturesLoaded) return;
+    auto tilesheetPath = resolveAssetPath(
+        "assets/kenney/medieval_rts/Tilesheet/medieval_tilesheet.png");
+    auto spritesheetPath = resolveAssetPath(
+        "assets/kenney/medieval_rts/Spritesheet/medievalRTS_spritesheet.png");
+    bool tilesOk = tilesheetTexture.loadFromFile(tilesheetPath.string());
+    bool spritesOk = spritesheetTexture.loadFromFile(spritesheetPath.string());
+    texturesLoaded = tilesOk && spritesOk;
+    if (!texturesLoaded) {
+        std::cerr << "[RenderSystem] Failed to load Kenney textures from "
+                  << tilesheetPath << " or " << spritesheetPath << "\n";
+        return;
+    }
+    tilesheetTexture.setSmooth(false);
+    spritesheetTexture.setSmooth(false);
+}
+
+void RenderSystem::initAtlasMapping() {
+    // Tilesheet grid coordinates (col,row) for the default terrain style.
+    tileAtlas.grass    = tilesheetRect(1, 0);
+    tileAtlas.grassAlt = tilesheetRect(0, 0);
+    tileAtlas.dirt     = tilesheetRect(0, 1);
+    tileAtlas.sand     = tilesheetRect(1, 1);
+    tileAtlas.stone    = tilesheetRect(2, 1);
+    tileAtlas.water    = tilesheetRect(0, 2);
+    tileAtlas.waterAlt = tilesheetRect(1, 2);
+    tileAtlas.snow     = tilesheetRect(2, 2);
+    tileAtlas.ice      = tilesheetRect(3, 2);
+    tileAtlas.mountain = tilesheetRect(2, 6);
+    tileAtlas.forest   = tilesheetRect(3, 6);
+
+    tileRects[static_cast<std::size_t>(TileType::PLAIN)] =
+        tileAtlas.grass;
+    tileRects[static_cast<std::size_t>(TileType::FOREST)] =
+        tileAtlas.forest;
+    tileRects[static_cast<std::size_t>(TileType::HILL)] =
+        tileAtlas.stone;
+    tileRects[static_cast<std::size_t>(TileType::SWAMP)] =
+        tileAtlas.dirt;
+    tileRects[static_cast<std::size_t>(TileType::RIVER)] =
+        tileAtlas.water;
+    tileRects[static_cast<std::size_t>(TileType::MOUNTAIN)] =
+        tileAtlas.mountain;
+
+    auto xmlPath = resolveAssetPath(
+        "assets/kenney/medieval_rts/Spritesheet/medievalRTS_spritesheet.xml");
+    spriteRects = loadSpritesheetRects(xmlPath);
+    auto bindRect = [&](const std::string& name, sf::IntRect& out) {
+        auto it = spriteRects.find(name);
+        if (it != spriteRects.end()) {
+            out = it->second;
+            return;
+        }
+        std::cerr << "[RenderSystem] Missing SubTexture: " << name << "\n";
+    };
+
+    bindRect("medievalUnit_01.png",
+             unitRects[static_cast<std::size_t>(UnitType::Infantry)]);
+    bindRect("medievalUnit_03.png",
+             unitRects[static_cast<std::size_t>(UnitType::Archer)]);
+    bindRect("medievalUnit_06.png",
+             unitRects[static_cast<std::size_t>(UnitType::Knight)]);
+    bindRect("medievalStructure_14.png", baseRect);
+}
+
+sf::IntRect RenderSystem::tilesheetRect(int col, int row) const {
+    const int step = RenderConfig::TILE_PITCH;
+    const int x = RenderConfig::TILE_ORIGIN + col * step;
+    const int y = RenderConfig::TILE_ORIGIN + row * step;
+    return sf::IntRect{{x, y},
+                       {RenderConfig::NATIVE_TILE_SIZE,
+                        RenderConfig::NATIVE_TILE_SIZE}};
+}
+
+sf::IntRect RenderSystem::tileRectFor(TileType t) const {
+    return tileRects[static_cast<std::size_t>(t)];
+}
+
+sf::IntRect RenderSystem::unitRectFor(UnitType t) const {
+    return unitRects[static_cast<std::size_t>(t)];
+}
+
+sf::Vector2f RenderSystem::tileTopLeft(const Layout& layout, const Coord& c) const {
+    return sf::Vector2f{
+        layout.offsetX + static_cast<float>(c.x) * layout.tileSize,
+        layout.offsetY + static_cast<float>(c.y) * layout.tileSize
+    };
+}
+
+sf::Vector2f RenderSystem::tileCenter(const Layout& layout, const Coord& c) const {
+    return sf::Vector2f{
+        layout.offsetX + (static_cast<float>(c.x) + 0.5f) * layout.tileSize,
+        layout.offsetY + (static_cast<float>(c.y) + 0.5f) * layout.tileSize
+    };
 }
 
 static void moveCursor(int row, int col) {
@@ -116,9 +277,7 @@ RenderSystem::Layout RenderSystem::computeLayout(
     float mapAreaWidth = std::max(100.f, static_cast<float>(winSize.x) - hudWidth);
     float mapAreaHeight = static_cast<float>(winSize.y);
 
-    float tileSizeX = mapAreaWidth  / static_cast<float>(W);
-    float tileSizeY = mapAreaHeight / static_cast<float>(H);
-    float tileSize  = std::min(tileSizeX, tileSizeY);
+    float tileSize = static_cast<float>(RenderConfig::TILE_SIZE);
 
     // 居中放在左侧那块区域
     float usedWidth  = tileSize * W;
@@ -204,6 +363,14 @@ void RenderSystem::drawSelectionRing(sf::RenderWindow& window,
                                      sf::Vector2f center,
                                      float radius,
                                      Faction f) {
+    drawFactionRing(window, center, radius, 3.f, f);
+}
+
+void RenderSystem::drawFactionRing(sf::RenderWindow& window,
+                                   sf::Vector2f center,
+                                   float radius,
+                                   float thickness,
+                                   Faction f) {
     sf::CircleShape ring;
     ring.setRadius(radius);
     ring.setOrigin(sf::Vector2f{radius, radius});
@@ -212,10 +379,9 @@ void RenderSystem::drawSelectionRing(sf::RenderWindow& window,
     auto color = factionColor(f);
     color.a = 220;
     ring.setOutlineColor(color);
-    ring.setOutlineThickness(3.f);
+    ring.setOutlineThickness(thickness);
     window.draw(ring);
 }
-
 
 void RenderSystem::drawUnitIcon(sf::RenderWindow& window,
                                 sf::Vector2f center,
@@ -252,36 +418,30 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
                                 sf::RenderWindow& window,
                                 const Layout& layout)
 {
+    if (!texturesLoaded) return;
     const int W = world.map.getWidth();
     const int H = world.map.getHeight();
 
-    sf::RectangleShape tileShape;
-    tileShape.setSize(sf::Vector2f{ layout.tileSize - 1.f,
-                                    layout.tileSize - 1.f });
+    const float tileScale =
+        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
+    sf::Sprite tileSprite(tilesheetTexture);
+    tileSprite.setScale({tileScale, tileScale});
+    tileSprite.setOrigin({0.f, 0.f});
 
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             Coord c{ x, y };
             const auto& tile = world.map.getTile(c);
 
-            sf::Vector2f pos{
-                layout.offsetX + x * layout.tileSize,
-                layout.offsetY + y * layout.tileSize
-            };
-            tileShape.setPosition(pos);
-            sf::Color base = tileColor(tile.getType());
-            float shade = 0.78f + 0.18f * std::sin((x + y * 0.45f) * 0.35f);
-            auto applyShade = [&](int c) -> std::uint8_t {
-                int v = static_cast<int>(static_cast<float>(c) * shade + 10.f);
-                v = std::clamp(v, 0, 255);
-                return static_cast<std::uint8_t>(v);
-            };
-            base.r = applyShade(base.r);
-            base.g = applyShade(base.g);
-            base.b = applyShade(base.b);
-            tileShape.setFillColor(base);
-
-            window.draw(tileShape);
+            sf::IntRect rect = tileRectFor(tile.getType());
+            if (tile.getType() == TileType::PLAIN) {
+                if (((x + y) % 7) == 0) rect = tileAtlas.grassAlt;
+            } else if (tile.getType() == TileType::RIVER) {
+                if (((x + y) % 5) == 0) rect = tileAtlas.waterAlt;
+            }
+            tileSprite.setTextureRect(rect);
+            tileSprite.setPosition(tileTopLeft(layout, c));
+            window.draw(tileSprite);
         }
     }
 }
@@ -291,39 +451,41 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
                                  sf::RenderWindow& window,
                                  const Layout& layout)
 {
-    auto drawBaseOne = [&](const std::shared_ptr<Base>& base) {
-        if (!base || base->isDestroyed()) return;
+    if (!texturesLoaded) return;
+    std::vector<const Base*> bases;
+    if (world.baseA && !world.baseA->isDestroyed()) bases.push_back(world.baseA.get());
+    if (world.baseB && !world.baseB->isDestroyed()) bases.push_back(world.baseB.get());
 
-        Coord   p = base->getPos();
+    std::sort(bases.begin(), bases.end(), [](const Base* a, const Base* b) {
+        if (a->getPos().y != b->getPos().y) return a->getPos().y < b->getPos().y;
+        return a->getPos().x < b->getPos().x;
+    });
+
+    const float tileScale =
+        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
+    sf::Sprite baseSprite(spritesheetTexture);
+    baseSprite.setTextureRect(baseRect);
+    baseSprite.setScale({tileScale, tileScale});
+    baseSprite.setOrigin({baseRect.size.x * 0.5f,
+                          baseRect.size.y * RenderConfig::FOOT_Y});
+
+    for (const Base* base : bases) {
+        Coord p = base->getPos();
         Faction f = base->getFaction();
+        sf::Vector2f center = tileCenter(layout, p);
 
-        float radius = layout.tileSize * 0.45f;
+        baseSprite.setPosition(center);
+        window.draw(baseSprite);
 
-        sf::CircleShape shape;
-        shape.setRadius(radius);
-        shape.setOrigin(sf::Vector2f{ radius, radius });
+        drawFactionRing(window, center, layout.tileSize * 0.38f, 2.5f, f);
 
-        sf::Vector2f center{
-            layout.offsetX + (p.x + 0.5f) * layout.tileSize,
-            layout.offsetY + (p.y + 0.5f) * layout.tileSize
-        };
-        shape.setPosition(center);
-
-        shape.setFillColor(factionColor(f));
-        shape.setOutlineColor(sf::Color::Black);
-        shape.setOutlineThickness(2.f);
-
-        window.draw(shape);
-
-        // 基地血条：在基地上方
         sf::Vector2f hpCenter{
             center.x,
-            center.y - layout.tileSize * 0.6f
+            center.y - layout.tileSize * 0.65f
         };
         drawHpBar(window, hpCenter, layout.tileSize * 0.9f,
                   base->hp, base->maxHp);
 
-        // 基地 ID
         ensureFontLoaded();
         if (fontLoaded) {
             sf::Text idText(hudFont, "Base #" + std::to_string(base->getId()));
@@ -332,84 +494,80 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
             auto bounds = idText.getLocalBounds();
             idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
                               bounds.position.y + bounds.size.y * 0.5f});
-            idText.setPosition({center.x, center.y + layout.tileSize * 0.65f});
+            idText.setPosition({center.x, center.y + layout.tileSize * 0.6f});
             window.draw(idText);
         }
-    };
-
-    drawBaseOne(world.baseA);
-    drawBaseOne(world.baseB);
+    }
 }
 
 void RenderSystem::drawUnitLayer(const GameWorld& world,
                                  sf::RenderWindow& window,
                                  const Layout& layout)
 {
+    if (!texturesLoaded) return;
     const auto& selected = world.getSelection();
 
-    auto drawUnits = [&](const auto& units) {
-        for (const auto& uPtr : units) {
-            const Unit& u = *uPtr;
-            if (!u.isAlive()) continue;
+    std::vector<const Unit*> units;
+    units.reserve(world.unitsA.size() + world.unitsB.size());
+    for (const auto& uPtr : world.unitsA) {
+        if (uPtr && uPtr->isAlive()) units.push_back(uPtr.get());
+    }
+    for (const auto& uPtr : world.unitsB) {
+        if (uPtr && uPtr->isAlive()) units.push_back(uPtr.get());
+    }
 
-            Coord   p = u.getPos();
-            Faction f = u.getFaction();
-            UnitType t = u.type;
+    std::sort(units.begin(), units.end(), [](const Unit* a, const Unit* b) {
+        if (a->getPos().y != b->getPos().y) return a->getPos().y < b->getPos().y;
+        return a->getPos().x < b->getPos().x;
+    });
 
-            float radius = layout.tileSize * 0.30f;
+    const float tileScale =
+        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
+    sf::Sprite unitSprite(spritesheetTexture);
+    unitSprite.setScale({tileScale, tileScale});
 
-            sf::CircleShape shape;
-            shape.setRadius(radius);
-            shape.setOrigin(sf::Vector2f{ radius, radius });
+    for (const Unit* unit : units) {
+        Coord p = unit->getPos();
+        Faction f = unit->getFaction();
+        UnitType t = unit->type;
 
-            sf::Vector2f center{
-                layout.offsetX + (p.x + 0.5f) * layout.tileSize,
-                layout.offsetY + (p.y + 0.5f) * layout.tileSize
-            };
-            shape.setPosition(center);
+        sf::IntRect rect = unitRectFor(t);
+        unitSprite.setTextureRect(rect);
+        unitSprite.setOrigin({rect.size.x * 0.5f,
+                              rect.size.y * RenderConfig::FOOT_Y});
 
-            // 兵种 => 填充色；阵营 => 描边色
-            shape.setFillColor(unitTypeColor(t));
-            shape.setOutlineColor(factionColor(f));
-            shape.setOutlineThickness(2.f);
+        sf::Vector2f center = tileCenter(layout, p);
+        unitSprite.setPosition(center);
+        window.draw(unitSprite);
 
-            window.draw(shape);
+        drawFactionRing(window, center, layout.tileSize * 0.28f, 2.f, f);
 
-            const bool isSelected = std::find(selected.begin(),
-                                              selected.end(),
-                                              u.id) != selected.end();
-            if (isSelected) {
-                drawSelectionRing(window, center, layout.tileSize * 0.40f, f);
-            }
-
-            // 单位血条：单位圆上方一点
-            sf::Vector2f hpCenter{
-                center.x,
-                center.y - layout.tileSize * 0.45f
-            };
-            drawHpBar(window, hpCenter, layout.tileSize * 0.8f,
-                      u.hp, u.baseStats.maxHP);
-
-            // 单位字母图标：I/A/K
-            drawUnitIcon(window, center, t, f);
-
-            // ID 标签
-            ensureFontLoaded();
-            if (fontLoaded) {
-                sf::Text idText(hudFont, "#" + std::to_string(u.id));
-                idText.setCharacterSize(12);
-                idText.setFillColor(sf::Color::Black);
-                auto bounds = idText.getLocalBounds();
-                idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
-                                  bounds.position.y + bounds.size.y * 0.5f});
-                idText.setPosition({center.x, center.y + layout.tileSize * 0.35f});
-                window.draw(idText);
-            }
+        const bool isSelected = std::find(selected.begin(),
+                                          selected.end(),
+                                          unit->id) != selected.end();
+        if (isSelected) {
+            drawSelectionRing(window, center, layout.tileSize * 0.40f, f);
         }
-    };
 
-    drawUnits(world.unitsA);
-    drawUnits(world.unitsB);
+        sf::Vector2f hpCenter{
+            center.x,
+            center.y - layout.tileSize * 0.55f
+        };
+        drawHpBar(window, hpCenter, layout.tileSize * 0.8f,
+                  unit->hp, unit->baseStats.maxHP);
+
+        ensureFontLoaded();
+        if (fontLoaded) {
+            sf::Text idText(hudFont, "#" + std::to_string(unit->id));
+            idText.setCharacterSize(12);
+            idText.setFillColor(sf::Color::Black);
+            auto bounds = idText.getLocalBounds();
+            idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
+                              bounds.position.y + bounds.size.y * 0.5f});
+            idText.setPosition({center.x, center.y + layout.tileSize * 0.35f});
+            window.draw(idText);
+        }
+    }
 }
 
 
@@ -452,9 +610,9 @@ void RenderSystem::drawHud(const GameWorld& world,
         text.setPosition(sf::Vector2f{ x, y });
         window.draw(text);
         y += 24.f;
-    } else if (awaitingProductionChoice) {
+    } else if (world.awaitingProductionChoice) {
         text.setFillColor(sf::Color(200, 180, 120));
-        text.setString("Select production (L/R/M)");
+        text.setString("Enter digits to choose production\n(1=Infantry, 2=Archer, 3=Knight), press Enter to confirm");
         text.setPosition(sf::Vector2f{ x, y });
         window.draw(text);
         y += 24.f;

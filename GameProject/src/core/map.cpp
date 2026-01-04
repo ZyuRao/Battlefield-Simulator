@@ -257,7 +257,7 @@ void MapGenerator::generateHeightMap(std::vector<std::vector<float>> &h) {
 
     FastNoiseLite noise;
     noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    noise.SetFrequency(0.05f);
+    noise.SetFrequency(0.065f);
     noise.SetSeed(seed);
 
     for(int y = 0; y < height; ++y) {
