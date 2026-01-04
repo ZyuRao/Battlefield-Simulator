@@ -326,7 +326,7 @@ void MapGenerator::carveRivers(const Map& map, std::vector<std::vector<float>>& 
 
 TileType MapGenerator::classifyHeight(float h) const {
     if(h < 0.40f) return TileType::PLAIN;
-    else if (h < 0.60f) return TileType::FOREST;
+    else if (h < 0.75f) return TileType::FOREST;
     else if (h < 0.90f) return TileType::HILL;
     else return TileType::MOUNTAIN;
 }

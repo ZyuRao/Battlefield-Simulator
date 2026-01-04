@@ -176,15 +176,15 @@ void GameWorld::startRenderThread() {
         const unsigned W = static_cast<unsigned>(map.getWidth());
         const unsigned H = static_cast<unsigned>(map.getHeight());
 
-        const unsigned hud  = 260;
-        const unsigned pad  = 40;
+        const float hud  = RenderConfig::HUD_WIDTH;
+        const float pad  = 40.f;
 
         const sf::VideoMode desktop = sf::VideoMode::getDesktopMode();
         const float maxW = std::floor(static_cast<float>(desktop.size.x) * 0.9f);
         const float maxH = std::floor(static_cast<float>(desktop.size.y) * 0.9f);
 
-        const float mapMaxW = std::max(0.f, maxW - static_cast<float>(hud + pad));
-        const float mapMaxH = std::max(0.f, maxH - static_cast<float>(pad));
+        const float mapMaxW = std::max(0.f, maxW - (hud + pad));
+        const float mapMaxH = std::max(0.f, maxH - pad);
 
         int tileSize = RenderConfig::TILE_SIZE;
         if (static_cast<float>(tileSize) * W > mapMaxW ||
@@ -213,6 +213,68 @@ void GameWorld::startRenderThread() {
         );
         window.setPosition(sf::Vector2i{60, 60});
         window.setFramerateLimit(60);
+
+        auto clearTargeting = [&]() {
+            pendingTarget.reset();
+            controlMode = ControlMode::Idle;
+            resume();
+        };
+        auto enterTargeting = [&]() {
+            pendingTarget.reset();
+            controlMode = ControlMode::Targeting;
+            pause();
+        };
+        auto selectUnit = [&](const std::shared_ptr<Unit>& unit) {
+            selectedUnitIds = {unit->id};
+            lastCommandInput = "click select";
+            lastCommandFeedback = "Selected #" + std::to_string(unit->id);
+        };
+        auto selectedFaction = [&]() -> std::optional<Faction> {
+            if (selectedUnitIds.empty()) return std::nullopt;
+            auto u = findUnit(selectedUnitIds.front());
+            if (!u) return std::nullopt;
+            return u->getFaction();
+        };
+        auto findUnitAt = [&](const Coord& coord) -> std::shared_ptr<Unit> {
+            for (auto& u : unitsA) {
+                if (u && u->isAlive() && u->getPos() == coord) return u;
+            }
+            for (auto& u : unitsB) {
+                if (u && u->isAlive() && u->getPos() == coord) return u;
+            }
+            return nullptr;
+        };
+        auto resolveEnemyAt = [&](Faction enemyFaction, const Coord& coord)
+            -> std::shared_ptr<IAttackable> {
+            if (enemyFaction == Faction::A) {
+                if (baseA && !baseA->isDestroyed() && baseA->getPos() == coord) return baseA;
+                for (auto& u : unitsA) {
+                    if (u && u->isAlive() && u->getPos() == coord) return u;
+                }
+                return nullptr;
+            }
+            if (baseB && !baseB->isDestroyed() && baseB->getPos() == coord) return baseB;
+            for (auto& u : unitsB) {
+                if (u && u->isAlive() && u->getPos() == coord) return u;
+            }
+            return nullptr;
+        };
+        auto issueMoveTo = [&](const Coord& coord) {
+            for (int id : selectedUnitIds) {
+                auto u = findUnit(id);
+                if (u) u->issueMove(coord);
+            }
+            lastCommandInput = "click move";
+            lastCommandFeedback = "Move to " + std::to_string(coord.x) + "," + std::to_string(coord.y);
+        };
+        auto issueAttack = [&](const std::shared_ptr<IAttackable>& target) {
+            for (int id : selectedUnitIds) {
+                auto u = findUnit(id);
+                if (u) u->issueAttackTarget(target);
+            }
+            lastCommandInput = "click attack";
+            lastCommandFeedback = "Attack target set";
+        };
         auto shutdownStart = std::chrono::steady_clock::time_point{};
         bool shutdownArmed = false;
         while(renderRunning.load()) {
@@ -250,6 +312,50 @@ void GameWorld::startRenderThread() {
                         if (key->code == Key::Escape) {
                             cancelProductionChoice();
                             resume();
+                            continue;
+                        }
+                    }
+
+                    if (controlMode == ControlMode::Targeting) {
+                        if (key->code == Key::Enter) {
+                            std::unique_lock<std::shared_mutex> lock(worldMutex);
+                            if (!pendingTarget || selectedUnitIds.empty()) {
+                                continue;
+                            }
+                            auto selFactionOpt = selectedFaction();
+                            if (!selFactionOpt.has_value()) {
+                                clearTargeting();
+                                continue;
+                            }
+                            Faction selFaction = *selFactionOpt;
+                            Faction enemyFaction =
+                                (selFaction == Faction::A) ? Faction::B : Faction::A;
+
+                            if (pendingTarget->kind == PendingTarget::Kind::Unit) {
+                                auto targetUnit = findUnit(pendingTarget->unitId);
+                                if (targetUnit && targetUnit->isAlive()) {
+                                    if (targetUnit->getFaction() == enemyFaction) {
+                                        issueAttack(targetUnit);
+                                    } else {
+                                        issueMoveTo(targetUnit->getPos());
+                                    }
+                                } else {
+                                    issueMoveTo(pendingTarget->tile);
+                                }
+                            } else {
+                                auto target = resolveEnemyAt(enemyFaction, pendingTarget->tile);
+                                if (target) {
+                                    issueAttack(target);
+                                } else {
+                                    issueMoveTo(pendingTarget->tile);
+                                }
+                            }
+                            clearTargeting();
+                            continue;
+                        }
+                        if (key->code == Key::Escape) {
+                            std::unique_lock<std::shared_mutex> lock(worldMutex);
+                            clearTargeting();
                             continue;
                         }
                     }
@@ -326,6 +432,28 @@ void GameWorld::startRenderThread() {
 
                     if (mouse->button == sf::Mouse::Button::Left) {
                         std::unique_lock<std::shared_mutex> lock(worldMutex);
+                        if (controlMode == ControlMode::Targeting) {
+                            auto hitUnit = findUnitAt(clicked);
+                            auto selFactionOpt = selectedFaction();
+                            if (hitUnit && selFactionOpt.has_value() &&
+                                hitUnit->getFaction() == *selFactionOpt) {
+                                selectUnit(hitUnit);
+                                pendingTarget.reset();
+                            } else if (hitUnit) {
+                                pendingTarget = PendingTarget{
+                                    PendingTarget::Kind::Unit,
+                                    hitUnit->getPos(),
+                                    hitUnit->id
+                                };
+                            } else {
+                                pendingTarget = PendingTarget{
+                                    PendingTarget::Kind::Tile,
+                                    clicked,
+                                    -1
+                                };
+                            }
+                            continue;
+                        }
                         std::shared_ptr<Base> baseTarget;
                         if (baseA && !baseA->isDestroyed() && baseA->getPos() == clicked) {
                             baseTarget = baseA;
@@ -345,12 +473,13 @@ void GameWorld::startRenderThread() {
                             }
                         }
                         if (pick) {
-                            selectedUnitIds = {pick->id};
-                            pause();
-                            lastCommandInput = "click select";
-                            lastCommandFeedback = "Selected #" + std::to_string(pick->id);
+                            selectUnit(pick);
+                            enterTargeting();
                         }
                     } else if (mouse->button == sf::Mouse::Button::Right) {
+                        if (controlMode == ControlMode::Targeting) {
+                            continue;
+                        }
                         std::unique_lock<std::shared_mutex> lock(worldMutex);
                         if (selectedUnitIds.empty()) continue;
 
@@ -450,13 +579,13 @@ void GameWorld::beginProductionChoice(const std::shared_ptr<Base>& base) {
     productionInputBuffer.clear();
     pause();
     lastCommandInput = "production choice";
-    lastCommandFeedback = "Enter unit code (1=Infantry, 2=Archer, 3=Knight) then press Enter; Esc to cancel";
+    lastCommandFeedback = "Enter unit code then press Enter; Esc to cancel";
 }
 
 bool GameWorld::handleProductionDigit(char digit) {
     if (!std::isdigit(static_cast<unsigned char>(digit))) return false;
     productionInputBuffer.push_back(digit);
-    lastCommandFeedback = "Production code: " + productionInputBuffer + " (Enter to confirm)";
+    lastCommandFeedback = "Production code: " + productionInputBuffer + " \n\t(Enter to confirm)";
     return true;
 }
 

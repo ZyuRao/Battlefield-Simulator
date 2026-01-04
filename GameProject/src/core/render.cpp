@@ -3,6 +3,8 @@
 #include <iostream>
 #include <string>
 #include <optional>
+#include <sstream>
+#include <functional>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +15,76 @@
 
 
 namespace {
+    float measureTextWidth(const sf::Font& font,
+                            const std::string& text,
+                            unsigned int size)
+    {
+        sf::Text measure(font, text);
+        measure.setCharacterSize(size);
+        return measure.getLocalBounds().size.x;
+    }
+
+    std::vector<std::string> wrapText(const sf::Font& font,
+                                      const std::string& text,
+                                      unsigned int size,
+                                      float maxWidth)
+    {
+        std::vector<std::string> lines;
+        if (text.empty()) {
+            lines.emplace_back("");
+            return lines;
+        }
+
+        std::istringstream stream(text);
+        std::string word;
+        std::string current;
+
+        std::function<void(const std::string&)> appendWord;
+        appendWord = [&](const std::string& token) {
+            if (token.empty()) return;
+            if (current.empty()) {
+                if (measureTextWidth(font, token, size) <= maxWidth) {
+                    current = token;
+                    return;
+                }
+                std::string chunk;
+                for (char ch : token) {
+                    std::string candidate = chunk + ch;
+                    if (measureTextWidth(font, candidate, size) <= maxWidth) {
+                        chunk = candidate;
+                    } else {
+                        if (!chunk.empty()) {
+                            lines.push_back(chunk);
+                        }
+                        chunk = std::string(1, ch);
+                    }
+                }
+                current = chunk;
+                return;
+            }
+
+            std::string candidate = current + " " + token;
+            if (measureTextWidth(font, candidate, size) <= maxWidth) {
+                current = candidate;
+                return;
+            }
+            lines.push_back(current);
+            current.clear();
+            appendWord(token);
+        };
+
+        while (stream >> word) {
+            appendWord(word);
+        }
+        if (!current.empty()) {
+            lines.push_back(current);
+        }
+        if (lines.empty()) {
+            lines.emplace_back("");
+        }
+        return lines;
+    }
+
     std::filesystem::path resolveAssetPath(const std::filesystem::path& relative) {
         std::filesystem::path base = std::filesystem::current_path();
         for (int i = 0; i < 4; ++i) {
@@ -46,48 +118,8 @@ namespace {
         #endif
     }
 
-    std::optional<std::string> extractAttr(const std::string& line,
-                                           const std::string& key) {
-        const std::string token = key + "=\"";
-        const auto start = line.find(token);
-        if (start == std::string::npos) return std::nullopt;
-        const auto valueStart = start + token.size();
-        const auto valueEnd = line.find('"', valueStart);
-        if (valueEnd == std::string::npos) return std::nullopt;
-        return line.substr(valueStart, valueEnd - valueStart);
-    }
-
-    std::unordered_map<std::string, sf::IntRect> loadSpritesheetRects(
-        const std::filesystem::path& xmlPath) {
-        std::unordered_map<std::string, sf::IntRect> rects;
-        std::ifstream file(xmlPath);
-        if (!file.is_open()) {
-            std::cerr << "[RenderSystem] Failed to open spritesheet XML: "
-                      << xmlPath << "\n";
-            return rects;
-        }
-
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.find("SubTexture") == std::string::npos) continue;
-            auto name = extractAttr(line, "name");
-            auto xStr = extractAttr(line, "x");
-            auto yStr = extractAttr(line, "y");
-            auto wStr = extractAttr(line, "width");
-            auto hStr = extractAttr(line, "height");
-            if (!name || !xStr || !yStr || !wStr || !hStr) continue;
-            try {
-                int x = std::stoi(*xStr);
-                int y = std::stoi(*yStr);
-                int w = std::stoi(*wStr);
-                int h = std::stoi(*hStr);
-                rects.emplace(*name, sf::IntRect{{x, y}, {w, h}});
-            } catch (const std::exception&) {
-                continue;
-            }
-        }
-
-        return rects;
+    sf::IntRect rectFromPixels(int x, int y, int w, int h) {
+        return sf::IntRect{{x, y}, {w, h}};
     }
 }
 
@@ -111,66 +143,54 @@ void RenderSystem::loadTextures() {
     if (texturesLoaded) return;
     auto tilesheetPath = resolveAssetPath(
         "assets/kenney/medieval_rts/Tilesheet/medieval_tilesheet.png");
-    auto spritesheetPath = resolveAssetPath(
-        "assets/kenney/medieval_rts/Spritesheet/medievalRTS_spritesheet.png");
     bool tilesOk = tilesheetTexture.loadFromFile(tilesheetPath.string());
-    bool spritesOk = spritesheetTexture.loadFromFile(spritesheetPath.string());
-    texturesLoaded = tilesOk && spritesOk;
+    texturesLoaded = tilesOk;
     if (!texturesLoaded) {
-        std::cerr << "[RenderSystem] Failed to load Kenney textures from "
-                  << tilesheetPath << " or " << spritesheetPath << "\n";
+        std::cerr << "[RenderSystem] Failed to load Kenney tilesheet from "
+                  << tilesheetPath << "\n";
         return;
     }
     tilesheetTexture.setSmooth(false);
-    spritesheetTexture.setSmooth(false);
 }
 
 void RenderSystem::initAtlasMapping() {
-    // Tilesheet grid coordinates (col,row) for the default terrain style.
-    tileAtlas.grass    = tilesheetRect(1, 0);
-    tileAtlas.grassAlt = tilesheetRect(0, 0);
-    tileAtlas.dirt     = tilesheetRect(0, 1);
-    tileAtlas.sand     = tilesheetRect(1, 1);
-    tileAtlas.stone    = tilesheetRect(2, 1);
-    tileAtlas.water    = tilesheetRect(0, 2);
-    tileAtlas.waterAlt = tilesheetRect(1, 2);
-    tileAtlas.snow     = tilesheetRect(2, 2);
-    tileAtlas.ice      = tilesheetRect(3, 2);
-    tileAtlas.mountain = tilesheetRect(2, 6);
-    tileAtlas.forest   = tilesheetRect(3, 6);
+    tileAtlas.plain        = rectFromPixels(126,  30, 68, 68);
+    tileAtlas.swamp        = rectFromPixels(318,  30, 68, 68);
+    tileAtlas.river        = rectFromPixels(126, 222, 68, 68);
+    tileAtlas.hillBase     = rectFromPixels(222, 126, 68, 68);
+    tileAtlas.mountBase    = rectFromPixels(318, 222, 68, 68);
+    tileAtlas.forest       = rectFromPixels(222, 414, 68, 68);
+    tileAtlas.hillOverlay  = rectFromPixels(718, 430, 36, 38);
+    tileAtlas.mountOverlay = rectFromPixels(910, 430, 36, 38);
 
     tileRects[static_cast<std::size_t>(TileType::PLAIN)] =
-        tileAtlas.grass;
+        tileAtlas.plain;
     tileRects[static_cast<std::size_t>(TileType::FOREST)] =
         tileAtlas.forest;
     tileRects[static_cast<std::size_t>(TileType::HILL)] =
-        tileAtlas.stone;
+        tileAtlas.hillBase;
     tileRects[static_cast<std::size_t>(TileType::SWAMP)] =
-        tileAtlas.dirt;
+        tileAtlas.swamp;
     tileRects[static_cast<std::size_t>(TileType::RIVER)] =
-        tileAtlas.water;
+        tileAtlas.river;
     tileRects[static_cast<std::size_t>(TileType::MOUNTAIN)] =
-        tileAtlas.mountain;
+        tileAtlas.mountBase;
 
-    auto xmlPath = resolveAssetPath(
-        "assets/kenney/medieval_rts/Spritesheet/medievalRTS_spritesheet.xml");
-    spriteRects = loadSpritesheetRects(xmlPath);
-    auto bindRect = [&](const std::string& name, sf::IntRect& out) {
-        auto it = spriteRects.find(name);
-        if (it != spriteRects.end()) {
-            out = it->second;
-            return;
-        }
-        std::cerr << "[RenderSystem] Missing SubTexture: " << name << "\n";
-    };
+    baseRect = rectFromPixels(1568, 56, 64, 42);
 
-    bindRect("medievalUnit_01.png",
-             unitRects[static_cast<std::size_t>(UnitType::Infantry)]);
-    bindRect("medievalUnit_03.png",
-             unitRects[static_cast<std::size_t>(UnitType::Archer)]);
-    bindRect("medievalUnit_06.png",
-             unitRects[static_cast<std::size_t>(UnitType::Knight)]);
-    bindRect("medievalStructure_14.png", baseRect);
+    unitRectsA[static_cast<std::size_t>(UnitType::Infantry)] =
+        rectFromPixels(1110, 434, 20, 28);
+    unitRectsA[static_cast<std::size_t>(UnitType::Archer)] =
+        rectFromPixels(1300, 432, 22, 30);
+    unitRectsA[static_cast<std::size_t>(UnitType::Knight)] =
+        rectFromPixels(1492, 434, 22, 28);
+
+    unitRectsB[static_cast<std::size_t>(UnitType::Infantry)] =
+        rectFromPixels(1110, 338, 20, 28);
+    unitRectsB[static_cast<std::size_t>(UnitType::Archer)] =
+        rectFromPixels(1300, 336, 22, 30);
+    unitRectsB[static_cast<std::size_t>(UnitType::Knight)] =
+        rectFromPixels(1492, 338, 22, 28);
 }
 
 sf::IntRect RenderSystem::tilesheetRect(int col, int row) const {
@@ -186,8 +206,11 @@ sf::IntRect RenderSystem::tileRectFor(TileType t) const {
     return tileRects[static_cast<std::size_t>(t)];
 }
 
-sf::IntRect RenderSystem::unitRectFor(UnitType t) const {
-    return unitRects[static_cast<std::size_t>(t)];
+sf::IntRect RenderSystem::unitRectFor(UnitType t, Faction f) const {
+    if (f == Faction::A) {
+        return unitRectsA[static_cast<std::size_t>(t)];
+    }
+    return unitRectsB[static_cast<std::size_t>(t)];
 }
 
 sf::Vector2f RenderSystem::tileTopLeft(const Layout& layout, const Coord& c) const {
@@ -273,7 +296,7 @@ RenderSystem::Layout RenderSystem::computeLayout(
 
     sf::Vector2u winSize = window.getSize();
 
-    const float hudWidth = 260.f; // 右侧 HUD 占的宽度
+    const float hudWidth = RenderConfig::HUD_WIDTH; // 右侧 HUD 占的宽度
     float mapAreaWidth = std::max(100.f, static_cast<float>(winSize.x) - hudWidth);
     float mapAreaHeight = static_cast<float>(winSize.y);
 
@@ -289,7 +312,7 @@ RenderSystem::Layout RenderSystem::computeLayout(
     lay.tileSize = tileSize;
     lay.offsetX  = offsetX;
     lay.offsetY  = offsetY;
-    lay.hudX     = mapAreaWidth + 10.f; // HUD 从地图右侧往右偏一点
+    lay.hudX     = mapAreaWidth + 16.f; // HUD 从地图右侧往右偏一点
 
     return lay;
 }
@@ -421,27 +444,61 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
     if (!texturesLoaded) return;
     const int W = world.map.getWidth();
     const int H = world.map.getHeight();
+    const bool hasBaseA = world.baseA && !world.baseA->isDestroyed();
+    const bool hasBaseB = world.baseB && !world.baseB->isDestroyed();
 
-    const float tileScale =
-        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
+    const float tileScale = layout.tileSize / 68.f;
+    const float overlayFactor = 0.80f;
+    const float overlayScale = tileScale * overlayFactor;
     sf::Sprite tileSprite(tilesheetTexture);
     tileSprite.setScale({tileScale, tileScale});
     tileSprite.setOrigin({0.f, 0.f});
+    sf::Sprite overlaySprite(tilesheetTexture);
+    overlaySprite.setScale({overlayScale, overlayScale});
+    overlaySprite.setOrigin({0.f, 0.f});
 
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             Coord c{ x, y };
             const auto& tile = world.map.getTile(c);
+            const bool hasBase =
+                (hasBaseA && world.baseA->getPos() == c) ||
+                (hasBaseB && world.baseB->getPos() == c);
 
-            sf::IntRect rect = tileRectFor(tile.getType());
-            if (tile.getType() == TileType::PLAIN) {
-                if (((x + y) % 7) == 0) rect = tileAtlas.grassAlt;
-            } else if (tile.getType() == TileType::RIVER) {
-                if (((x + y) % 5) == 0) rect = tileAtlas.waterAlt;
+            TileType type = tile.getType();
+            sf::IntRect rect = tileRectFor(type);
+            bool drawOverlay = (type == TileType::HILL || type == TileType::MOUNTAIN);
+
+            if (hasBase && type == TileType::FOREST) {
+                rect = tileAtlas.plain;
+                drawOverlay = false;
+            } else if (hasBase && type == TileType::HILL) {
+                rect = tileAtlas.hillBase;
+                drawOverlay = false;
             }
+
             tileSprite.setTextureRect(rect);
-            tileSprite.setPosition(tileTopLeft(layout, c));
+            sf::Vector2f topLeft = tileTopLeft(layout, c);
+            tileSprite.setPosition(topLeft);
             window.draw(tileSprite);
+
+            if (drawOverlay) {
+                const sf::IntRect overlayRect =
+                    (type == TileType::HILL)
+                        ? tileAtlas.hillOverlay
+                        : tileAtlas.mountOverlay;
+                overlaySprite.setTextureRect(overlayRect);
+                const float overlayW =
+                    static_cast<float>(overlayRect.size.x) * overlayScale;
+                const float overlayH =
+                    static_cast<float>(overlayRect.size.y) * overlayScale;
+                const float posX =
+                    topLeft.x + (layout.tileSize - overlayW) * 0.5f;
+                const float posY =
+                    topLeft.y + (layout.tileSize - overlayH) * 0.5f;
+                overlaySprite.setPosition({posX, posY});
+                window.draw(overlaySprite);
+            }
         }
     }
 }
@@ -461,23 +518,26 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
         return a->getPos().x < b->getPos().x;
     });
 
-    const float tileScale =
-        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
-    sf::Sprite baseSprite(spritesheetTexture);
+    sf::Sprite baseSprite(tilesheetTexture);
     baseSprite.setTextureRect(baseRect);
-    baseSprite.setScale({tileScale, tileScale});
-    baseSprite.setOrigin({baseRect.size.x * 0.5f,
-                          baseRect.size.y * RenderConfig::FOOT_Y});
+    const float baseScaleX =
+        (layout.tileSize / static_cast<float>(baseRect.size.x)) * 0.95f;
+    const float baseScaleY =
+        layout.tileSize / static_cast<float>(baseRect.size.y);
+    baseSprite.setScale({baseScaleX, baseScaleY});
+    baseSprite.setOrigin({0.f, 0.f});
+    const float baseW = static_cast<float>(baseRect.size.x) * baseScaleX;
+    const float baseH = static_cast<float>(baseRect.size.y) * baseScaleY;
 
     for (const Base* base : bases) {
         Coord p = base->getPos();
-        Faction f = base->getFaction();
         sf::Vector2f center = tileCenter(layout, p);
+        sf::Vector2f topLeft = tileTopLeft(layout, p);
+        const float posX = topLeft.x + (layout.tileSize - baseW) * 0.5f;
+        const float posY = topLeft.y + layout.tileSize - baseH;
 
-        baseSprite.setPosition(center);
+        baseSprite.setPosition({posX, posY});
         window.draw(baseSprite);
-
-        drawFactionRing(window, center, layout.tileSize * 0.38f, 2.5f, f);
 
         sf::Vector2f hpCenter{
             center.x,
@@ -485,17 +545,17 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
         };
         drawHpBar(window, hpCenter, layout.tileSize * 0.9f,
                   base->hp, base->maxHp);
-
-        ensureFontLoaded();
-        if (fontLoaded) {
-            sf::Text idText(hudFont, "Base #" + std::to_string(base->getId()));
-            idText.setCharacterSize(14);
-            idText.setFillColor(sf::Color::White);
-            auto bounds = idText.getLocalBounds();
-            idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
-                              bounds.position.y + bounds.size.y * 0.5f});
-            idText.setPosition({center.x, center.y + layout.tileSize * 0.6f});
-            window.draw(idText);
+        if (world.awaitingProductionChoice) {
+            auto selected = world.productionChoiceBase.lock();
+            if (selected && selected.get() == base) {
+                sf::RectangleShape box;
+                box.setSize({layout.tileSize, layout.tileSize});
+                box.setPosition(topLeft);
+                box.setFillColor(sf::Color::Transparent);
+                box.setOutlineThickness(2.f);
+                box.setOutlineColor(sf::Color(240, 220, 120));
+                window.draw(box);
+            }
         }
     }
 }
@@ -505,8 +565,6 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
                                  const Layout& layout)
 {
     if (!texturesLoaded) return;
-    const auto& selected = world.getSelection();
-
     std::vector<const Unit*> units;
     units.reserve(world.unitsA.size() + world.unitsB.size());
     for (const auto& uPtr : world.unitsA) {
@@ -521,52 +579,49 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
         return a->getPos().x < b->getPos().x;
     });
 
-    const float tileScale =
-        layout.tileSize / static_cast<float>(RenderConfig::NATIVE_TILE_SIZE);
-    sf::Sprite unitSprite(spritesheetTexture);
-    unitSprite.setScale({tileScale, tileScale});
+    sf::Sprite unitSprite(tilesheetTexture);
+    const float tileScale = layout.tileSize / 68.f;
+    const float unitFactor = 2.2f;
+    const float unitScale = tileScale * unitFactor;
+    unitSprite.setScale({unitScale, unitScale});
 
     for (const Unit* unit : units) {
         Coord p = unit->getPos();
         Faction f = unit->getFaction();
         UnitType t = unit->type;
 
-        sf::IntRect rect = unitRectFor(t);
+        sf::IntRect rect = unitRectFor(t, f);
         unitSprite.setTextureRect(rect);
-        unitSprite.setOrigin({rect.size.x * 0.5f,
-                              rect.size.y * RenderConfig::FOOT_Y});
+        unitSprite.setOrigin({0.f, 0.f});
 
-        sf::Vector2f center = tileCenter(layout, p);
-        unitSprite.setPosition(center);
+        sf::Vector2f topLeft = tileTopLeft(layout, p);
+        const float spriteW = static_cast<float>(rect.size.x) * unitScale;
+        const float spriteH = static_cast<float>(rect.size.y) * unitScale;
+        const float posX = topLeft.x + (layout.tileSize - spriteW) * 0.5f;
+        const float posY = topLeft.y + (layout.tileSize - spriteH) * 0.5f +
+                           layout.tileSize * 0.10f;
+        unitSprite.setPosition({posX, posY});
         window.draw(unitSprite);
-
-        drawFactionRing(window, center, layout.tileSize * 0.28f, 2.f, f);
-
-        const bool isSelected = std::find(selected.begin(),
-                                          selected.end(),
-                                          unit->id) != selected.end();
-        if (isSelected) {
-            drawSelectionRing(window, center, layout.tileSize * 0.40f, f);
-        }
-
+        sf::Vector2f center = tileCenter(layout, p);
         sf::Vector2f hpCenter{
             center.x,
             center.y - layout.tileSize * 0.55f
         };
         drawHpBar(window, hpCenter, layout.tileSize * 0.8f,
                   unit->hp, unit->baseStats.maxHP);
+    }
 
-        ensureFontLoaded();
-        if (fontLoaded) {
-            sf::Text idText(hudFont, "#" + std::to_string(unit->id));
-            idText.setCharacterSize(12);
-            idText.setFillColor(sf::Color::Black);
-            auto bounds = idText.getLocalBounds();
-            idText.setOrigin({bounds.position.x + bounds.size.x * 0.5f,
-                              bounds.position.y + bounds.size.y * 0.5f});
-            idText.setPosition({center.x, center.y + layout.tileSize * 0.35f});
-            window.draw(idText);
-        }
+    if (world.controlMode == GameWorld::ControlMode::Targeting &&
+        world.pendingTarget.has_value()) {
+        Coord targetTile = world.pendingTarget->tile;
+        sf::Vector2f topLeft = tileTopLeft(layout, targetTile);
+        sf::RectangleShape box;
+        box.setSize({layout.tileSize, layout.tileSize});
+        box.setPosition(topLeft);
+        box.setFillColor(sf::Color::Transparent);
+        box.setOutlineThickness(2.f);
+        box.setOutlineColor(sf::Color(120, 200, 240));
+        window.draw(box);
     }
 }
 
@@ -612,7 +667,7 @@ void RenderSystem::drawHud(const GameWorld& world,
         y += 24.f;
     } else if (world.awaitingProductionChoice) {
         text.setFillColor(sf::Color(200, 180, 120));
-        text.setString("Enter digits to choose production\n(1=Infantry, 2=Archer, 3=Knight), press Enter to confirm");
+        text.setString("Enter digits to choose production\n(1=Infantry, 2=Archer, 3=Knight),\n\tpress Enter to confirm");
         text.setPosition(sf::Vector2f{ x, y });
         window.draw(text);
         y += 24.f;
@@ -682,39 +737,129 @@ void RenderSystem::drawCommandPanel(const GameWorld& world,
     ensureFontLoaded();
     if (!fontLoaded) return;
 
-    float padding = 12.f;
-    float boxWidth = std::max(240.f, static_cast<float>(window.getSize().x) - layout.hudX - 20.f);
-    float boxHeight = 80.f;
-    float x = layout.hudX;
-    float y = static_cast<float>(window.getSize().y) - boxHeight - 10.f;
+    const unsigned int titleSize = 12;
+    const unsigned int inputSize = 16;
+    const unsigned int bodySize = 13;
+    const float padding = 12.f;
+    const float labelGap = 8.f;
+    const float boxWidth = std::max(280.f, static_cast<float>(window.getSize().x) - layout.hudX - 24.f);
+
+    const float labelWidth = std::max(
+        measureTextWidth(hudFont, "CMD>", inputSize),
+        std::max(measureTextWidth(hudFont, "LAST", bodySize),
+                 measureTextWidth(hudFont, "STATUS", bodySize))
+    );
+
+    const float contentWidth = std::max(80.f, boxWidth - padding * 2.f - labelWidth - labelGap);
+    const auto inputLines = wrapText(hudFont,
+                                     inputBuffer + (inputActive ? "_" : ""),
+                                     inputSize,
+                                     contentWidth);
+    const auto lastLines = wrapText(hudFont, world.getLastCommandInput(), bodySize, contentWidth);
+    const auto statusLines = wrapText(hudFont, world.getLastCommandFeedback(), bodySize, contentWidth);
+
+    const float titleLine = hudFont.getLineSpacing(titleSize);
+    const float inputLine = hudFont.getLineSpacing(inputSize);
+    const float bodyLine = hudFont.getLineSpacing(bodySize);
+
+    float boxHeight = padding * 2.f;
+    boxHeight += titleLine + 4.f;
+    boxHeight += inputLine * static_cast<float>(inputLines.size());
+    boxHeight += 6.f;
+    boxHeight += 1.f + 8.f;
+    boxHeight += bodyLine * static_cast<float>(lastLines.size());
+    boxHeight += 4.f;
+    boxHeight += bodyLine * static_cast<float>(statusLines.size());
+    boxHeight = std::max(120.f, boxHeight);
+
+    const float x = layout.hudX;
+    const float y = static_cast<float>(window.getSize().y) - boxHeight - 12.f;
 
     sf::RectangleShape box;
     box.setSize({boxWidth, boxHeight});
     box.setPosition({x, y});
-    box.setFillColor(sf::Color(20, 20, 30, 200));
-    box.setOutlineColor(sf::Color(80, 130, 230, 200));
+    box.setFillColor(sf::Color(16, 18, 24, 210));
+    box.setOutlineColor(sf::Color(90, 140, 230, 200));
     box.setOutlineThickness(1.5f);
     window.draw(box);
 
-    sf::Text line(hudFont);
-    line.setCharacterSize(14);
-    line.setFillColor(sf::Color::White);
+    const float cursorX = x + padding;
+    float cursorY = y + padding;
+    const float labelAnchorX = cursorX + labelWidth;
+    const float valueX = labelAnchorX + labelGap;
 
-    line.setString("CMD> " + inputBuffer + (inputActive ? "_" : ""));
-    line.setPosition({x + padding, y + 8.f});
-    window.draw(line);
+    sf::Text title(hudFont, "COMMAND");
+    title.setCharacterSize(titleSize);
+    title.setFillColor(sf::Color(150, 180, 220));
+    title.setPosition({cursorX, cursorY});
+    window.draw(title);
+    cursorY += titleLine + 4.f;
 
-    sf::Text last(hudFont, "Last: " + world.getLastCommandInput());
-    last.setCharacterSize(13);
-    last.setFillColor(sf::Color(200, 200, 200));
-    last.setPosition({x + padding, y + 30.f});
-    window.draw(last);
+    sf::Text label(hudFont);
+    label.setFillColor(sf::Color(150, 180, 220));
 
-    sf::Text feedback(hudFont, "Status: " + world.getLastCommandFeedback());
-    feedback.setCharacterSize(13);
-    feedback.setFillColor(sf::Color(170, 220, 170));
-    feedback.setPosition({x + padding, y + 52.f});
-    window.draw(feedback);
+    sf::Text value(hudFont);
+    value.setFillColor(sf::Color::White);
+
+    for (size_t i = 0; i < inputLines.size(); ++i) {
+        if (i == 0) {
+            label.setString("CMD>");
+            label.setCharacterSize(inputSize);
+            auto bounds = label.getLocalBounds();
+            label.setOrigin({bounds.position.x + bounds.size.x, bounds.position.y});
+            label.setPosition({labelAnchorX, cursorY});
+            window.draw(label);
+        }
+
+        value.setCharacterSize(inputSize);
+        value.setStyle(sf::Text::Bold);
+        value.setString(inputLines[i]);
+        value.setPosition({valueX, cursorY});
+        window.draw(value);
+        cursorY += inputLine;
+    }
+
+    sf::RectangleShape divider;
+    divider.setSize({boxWidth - padding * 2.f, 1.f});
+    divider.setPosition({cursorX, cursorY});
+    divider.setFillColor(sf::Color(80, 110, 150, 180));
+    window.draw(divider);
+    cursorY += 8.f;
+
+    value.setCharacterSize(bodySize);
+    value.setStyle(sf::Text::Regular);
+    value.setFillColor(sf::Color(200, 200, 210));
+    for (size_t i = 0; i < lastLines.size(); ++i) {
+        if (i == 0) {
+            label.setString("LAST");
+            label.setCharacterSize(bodySize);
+            auto bounds = label.getLocalBounds();
+            label.setOrigin({bounds.position.x + bounds.size.x, bounds.position.y});
+            label.setPosition({labelAnchorX, cursorY});
+            window.draw(label);
+        }
+        value.setString(lastLines[i]);
+        value.setPosition({valueX, cursorY});
+        window.draw(value);
+        cursorY += bodyLine;
+    }
+    cursorY += 4.f;
+
+    value.setFillColor(sf::Color(170, 220, 170));
+    for (size_t i = 0; i < statusLines.size(); ++i) {
+        if (i == 0) {
+            label.setString("STATUS");
+            label.setCharacterSize(bodySize);
+            auto bounds = label.getLocalBounds();
+            label.setOrigin({bounds.position.x + bounds.size.x, bounds.position.y});
+            label.setPosition({labelAnchorX, cursorY});
+            window.draw(label);
+        }
+        value.setString(statusLines[i]);
+        value.setPosition({valueX, cursorY});
+        window.draw(value);
+        cursorY += bodyLine;
+    }
 }
 
 void RenderSystem::drawIntroOverlay(sf::RenderWindow& window) {

@@ -121,29 +121,25 @@ private:
     sf::Font hudFont;
     bool fontLoaded = false;
     sf::Texture tilesheetTexture;
-    sf::Texture spritesheetTexture;
     bool texturesLoaded = false;
 
     static constexpr std::size_t kTileTypeCount = 6;
     static constexpr std::size_t kUnitTypeCount = 3;
     struct TileAtlas {
-        sf::IntRect grass{};
-        sf::IntRect grassAlt{};
-        sf::IntRect dirt{};
-        sf::IntRect sand{};
-        sf::IntRect stone{};
-        sf::IntRect water{};
-        sf::IntRect waterAlt{};
-        sf::IntRect snow{};
-        sf::IntRect ice{};
-        sf::IntRect mountain{};
+        sf::IntRect plain{};
+        sf::IntRect swamp{};
+        sf::IntRect river{};
+        sf::IntRect hillBase{};
+        sf::IntRect mountBase{};
         sf::IntRect forest{};
+        sf::IntRect hillOverlay{};
+        sf::IntRect mountOverlay{};
     };
     TileAtlas tileAtlas{};
     std::array<sf::IntRect, kTileTypeCount> tileRects{};
-    std::array<sf::IntRect, kUnitTypeCount> unitRects{};
+    std::array<sf::IntRect, kUnitTypeCount> unitRectsA{};
+    std::array<sf::IntRect, kUnitTypeCount> unitRectsB{};
     sf::IntRect baseRect{};
-    std::unordered_map<std::string, sf::IntRect> spriteRects;
 
     // 工具函数
     void ensureFontLoaded();
@@ -151,7 +147,7 @@ private:
     void initAtlasMapping();
     sf::IntRect tilesheetRect(int col, int row) const;
     sf::IntRect tileRectFor(TileType t) const;
-    sf::IntRect unitRectFor(UnitType t) const;
+    sf::IntRect unitRectFor(UnitType t, Faction f) const;
     sf::Vector2f tileTopLeft(const Layout& layout, const Coord& c) const;
     sf::Vector2f tileCenter(const Layout& layout, const Coord& c) const;
 
@@ -248,10 +244,19 @@ private:
     std::atomic<long long>        gameEndTimestampMs{0};
 
     // --- 命令和交互状态 ---
+    enum class ControlMode { Idle, Targeting };
+    struct PendingTarget {
+        enum class Kind { Tile, Unit };
+        Kind kind = Kind::Tile;
+        Coord tile{};
+        int unitId = -1;
+    };
     CommandQueue           commandQueue;
     std::string            lastCommandInput;
     std::string            lastCommandFeedback;
     std::vector<int>       selectedUnitIds;
+    ControlMode            controlMode = ControlMode::Idle;
+    std::optional<PendingTarget> pendingTarget;
     bool                   quitRequested = false;
     int                    nextUnitId = 1;
     int                    nextBaseId = 1;
