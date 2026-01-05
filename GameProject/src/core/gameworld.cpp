@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <cmath>
 #include <cctype>
+#include <limits>
 
 
 namespace {
@@ -82,11 +83,6 @@ namespace {
         return unitPtr ? unitPtr->getId() : -1;
     }
 
-    struct AttackableKey {
-        int id = -1;
-        AttackableType type = AttackableType::UNIT;
-    };
-
     AttackableKey attackableKey(const std::shared_ptr<IAttackable>& target) {
         AttackableKey key;
         if (!target) return key;
@@ -101,145 +97,563 @@ namespace {
         return key;
     }
 
-    std::vector<std::shared_ptr<IAttackable>> collectVisibleEnemies(
-        const Unit& unit,
+    struct UnitSnapshot {
+        int id = -1;
+        UnitType type = UnitType::Infantry;
+        Faction faction = Faction::A;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        UnitStats stats{};
+        float cooldown = 0.f;
+        AttackableKey currentTarget{};
+        float commitTimer = 0.f;
+        AttackableKey commitTarget{};
+        bool commandAttackActive = false;
+        AttackableKey commandTarget{};
+        bool retreating = false;
+        float retreatTimer = 0.f;
+        Coord retreatAnchor{};
+        bool hasRetreatAnchor = false;
+        float timeSinceDamaged = 0.f;
+        float timeSinceDealtDamage = 0.f;
+        bool commandMoveActive = false;
+        LocomotionState locomotionState = LocomotionState::Idle;
+        CombatState combatState = CombatState::None;
+        MoveReason moveReason = MoveReason::None;
+        IMovementBehavior::MovementState movementState;
+    };
+
+    struct AttackableSnapshot {
+        AttackableKey key{};
+        AttackableType type = AttackableType::UNIT;
+        Faction faction = Faction::A;
+        UnitType unitType = UnitType::Infantry;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        float attack = 0.f;
+        float attackRange = 0.f;
+        float armor = 0.f;
+        bool isBase = false;
+    };
+
+    struct TargetScoreParams {
+        float distanceWeight = 1.2f;
+        float threatWeight = 1.0f;
+        float ttkWeight = 1.4f;
+        float executeWeight = 0.9f;
+        float preferenceWeight = 1.2f;
+        float overkillWeight = 1.1f;
+        float lockWeight = 0.6f;
+        float baseWeight = 0.8f;
+        float baseThreatPenalty = 1.2f;
+        float baseFinishBonus = 0.7f;
+        float commitBonus = 0.8f;
+        float commitDuration = 0.6f;
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteRangeMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+        float siegeHoldTime = 0.8f;
+        float losPenalty = 1.2f;
+        float unreachablePenalty = 1.8f;
+        float availabilityWeight = 0.9f;
+        int availabilityCap = 8;
+    };
+
+    struct ActionParams {
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+    };
+
+    struct RetreatParams {
+        float hpEnter = 0.35f;
+        float hpExit = 0.55f;
+        float threatEnter = 32.f;
+        float threatExit = 22.f;
+        float retreatMinTime = 0.8f;
+        int maxRetreatDist = 12;
+        int sampleRadius = 6;
+        float retreatFireThreat = 24.f;
+    };
+
+    struct OocParams {
+        float delay = 2.0f;
+        float regenRate = 0.08f;
+        float threatThreshold = 12.f;
+    };
+
+    const TargetScoreParams kTargetParams{};
+    const ActionParams kActionParams{};
+    const RetreatParams kRetreatParams{};
+    const OocParams kOocParams{};
+    constexpr float kThreatRadius = 6.0f;
+
+    float unitPreference(UnitType self, UnitType target) {
+        static const float prefs[3][3] = {
+            {1.5f, 1.0f, 1.2f},  // Infantry vs {Infantry, Archer, Knight}
+            {1.0f, 1.5f, 1.2f},  // Archer
+            {1.2f, 0.9f, 1.3f}   // Knight
+        };
+        return prefs[static_cast<int>(self)][static_cast<int>(target)];
+    }
+
+    float basePreference(UnitType self) {
+        switch (self) {
+            case UnitType::Infantry: return 0.9f;
+            case UnitType::Archer:   return 0.7f;
+            case UnitType::Knight:   return 1.1f;
+        }
+        return 1.0f;
+    }
+
+    float threatScore(const AttackableSnapshot& target) {
+        if (target.isBase) return 0.f;
+        return target.attack * (0.6f + 0.12f * target.attackRange);
+    }
+
+    float distanceScore(float dist) {
+        return 1.0f / (1.0f + dist);
+    }
+
+    float ttkScore(const UnitSnapshot& self, const AttackableSnapshot& target) {
+        float dps = std::max(1.0f, self.stats.attack);
+        float ttk = target.hp / dps;
+        return 1.0f / (1.0f + ttk);
+    }
+
+    bool containsKey(const std::vector<const AttackableSnapshot*>& visible,
+                     const AttackableKey& key) {
+        for (const auto* v : visible) {
+            if (v && v->key == key) return true;
+        }
+        return false;
+    }
+
+    std::vector<const AttackableSnapshot*> collectVisibleEnemies(
+        const UnitSnapshot& unit,
         const Map& map,
-        const std::vector<std::weak_ptr<IAttackable>>& enemies,
-        const std::vector<std::weak_ptr<IAttackable>>& forcedVisible)
+        const std::vector<AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys)
     {
-        std::vector<std::shared_ptr<IAttackable>> visible;
-        if (!map.inBounds(unit.getPos())) return visible;
+        std::vector<const AttackableSnapshot*> visible;
+        if (!map.inBounds(unit.pos)) return visible;
 
-        const Tile& tile = map.getTile(unit.getPos());
-        float effVision = unit.baseStats.visionRange + tile.getVisionBonus();
+        const Tile& tile = map.getTile(unit.pos);
+        float effVision = unit.stats.visionRange + tile.getVisionBonus();
 
-        for (const auto& w : enemies) {
-            auto e = w.lock();
-            if (!e || e->isDestroyed()) continue;
-            Coord p = e->getPos();
-            if (!map.inBounds(p)) continue;
-            float d = unit.getPos().mhtDistanceTo(p);
+        for (const auto& e : enemies) {
+            if (!map.inBounds(e.pos)) continue;
+            float d = unit.pos.mhtDistanceTo(e.pos);
             if (d <= effVision) {
-                visible.push_back(e);
+                visible.push_back(&e);
             }
         }
 
-        for (const auto& w : forcedVisible) {
-            auto e = w.lock();
-            if (!e || e->isDestroyed()) continue;
-            if (std::find(visible.begin(), visible.end(), e) == visible.end()) {
-                visible.push_back(e);
+        for (const auto& key : forcedKeys) {
+            auto it = enemyIndex.find(key);
+            if (it == enemyIndex.end()) continue;
+            const auto* target = &enemies[it->second];
+            if (!containsKey(visible, target->key)) {
+                visible.push_back(target);
             }
         }
 
         return visible;
     }
 
-    int pickTargetId(const Unit& unit,
-                     const std::vector<std::shared_ptr<IAttackable>>& visible) {
-        std::shared_ptr<IAttackable> bestBase;
-        float bestBaseDist = 1e9f;
-        std::shared_ptr<IAttackable> bestUnit;
-        float bestUnitDist = 1e9f;
+    float computeLocalThreat(const UnitSnapshot& self,
+                             const std::vector<const AttackableSnapshot*>& enemies,
+                             float radius) {
+        float threat = 0.f;
+        for (const auto* e : enemies) {
+            if (!e || e->isBase) continue;
+            float dist = self.pos.mhtDistanceTo(e->pos);
+            if (dist <= radius) {
+                threat += threatScore(*e);
+            }
+        }
+        return threat;
+    }
 
-        for (const auto& e : visible) {
-            if (!e || e->isDestroyed()) continue;
-            float d = unit.getPos().mhtDistanceTo(e->getPos());
-            if (e->getAttackType() == AttackableType::BASE) {
-                if (d < bestBaseDist) {
-                    bestBaseDist = d;
-                    bestBase = e;
+    int countNearbyAllies(const std::vector<UnitSnapshot>& allies,
+                          const Coord& pos,
+                          int radius) {
+        int count = 0;
+        for (const auto& ally : allies) {
+            if (ally.hp <= 0.f) continue;
+            if (ally.pos.mhtDistanceTo(pos) <= radius) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    int countNearbyEnemies(const std::vector<const AttackableSnapshot*>& enemies,
+                           const Coord& pos,
+                           int radius) {
+        int count = 0;
+        for (const auto* e : enemies) {
+            if (!e || e->isBase) continue;
+            if (e->pos.mhtDistanceTo(pos) <= radius) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    float baseOpportunityScore(const UnitSnapshot& self,
+                               const AttackableSnapshot& base,
+                               const std::vector<UnitSnapshot>& allies,
+                               const std::vector<const AttackableSnapshot*>& enemies,
+                               const TargetScoreParams& params,
+                               float localThreat) {
+        int allyNear = countNearbyAllies(allies, base.pos, 6);
+        int enemyNear = countNearbyEnemies(enemies, base.pos, 6);
+        float advantage = (allyNear + 1.0f) / (enemyNear + 1.0f);
+        float hpFrac = (base.maxHp > 0.f) ? (base.hp / base.maxHp) : 1.0f;
+        float finishBonus = 1.0f + (1.0f - hpFrac) * params.baseFinishBonus;
+        float threatPenalty = (localThreat >= params.threatRetreat) ? 0.6f : 1.0f;
+        return advantage * finishBonus * threatPenalty;
+    }
+
+    std::uint64_t packCoord(const Coord& c);
+
+    struct ReachableGrid {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> reachable;
+
+        bool isReachable(const Coord& c) const {
+            if (c.x < 0 || c.x >= width || c.y < 0 || c.y >= height) return false;
+            std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
+            return reachable[idx] != 0;
+        }
+    };
+
+    ReachableGrid buildReachableGrid(const Map& map, const Coord& start) {
+        ReachableGrid grid;
+        grid.width = map.getWidth();
+        grid.height = map.getHeight();
+        grid.reachable.assign(static_cast<std::size_t>(grid.width * grid.height), 0);
+
+        if (!map.inBounds(start)) return grid;
+        if (!map.getTile(start).isPassable()) return grid;
+
+        std::queue<Coord> q;
+        std::vector<Coord> nbrs;
+        q.push(start);
+        grid.reachable[static_cast<std::size_t>(start.y) * grid.width + start.x] = 1;
+
+        while (!q.empty()) {
+            Coord cur = q.front();
+            q.pop();
+            map.getNeighbors(cur, nbrs);
+            for (const auto& n : nbrs) {
+                if (!map.inBounds(n)) continue;
+                if (!map.getTile(n).isPassable()) continue;
+                std::size_t idx = static_cast<std::size_t>(n.y) * grid.width + n.x;
+                if (grid.reachable[idx]) continue;
+                grid.reachable[idx] = 1;
+                q.push(n);
+            }
+        }
+
+        return grid;
+    }
+
+    float firingPositionAvailability(const UnitSnapshot& self,
+                                     const AttackableSnapshot& target,
+                                     const Map& map,
+                                     const ReachableGrid& reachable,
+                                     const std::unordered_set<std::uint64_t>& occ,
+                                     int cap) {
+        int range = static_cast<int>(std::floor(self.stats.attackRange + 0.001f));
+        if (range <= 0) return 0.f;
+
+        int count = 0;
+        int minX = target.pos.x - range;
+        int maxX = target.pos.x + range;
+        int minY = target.pos.y - range;
+        int maxY = target.pos.y + range;
+
+        for (int y = minY; y <= maxY; ++y) {
+            for (int x = minX; x <= maxX; ++x) {
+                Coord cand{x, y};
+                if (!map.inBounds(cand)) continue;
+                if (std::abs(cand.x - target.pos.x) + std::abs(cand.y - target.pos.y) > range) {
+                    continue;
                 }
-            } else {
-                if (d < bestUnitDist) {
-                    bestUnitDist = d;
-                    bestUnit = e;
+                if (!map.getTile(cand).isPassable()) continue;
+                if (!reachable.isReachable(cand)) continue;
+                if (map.hasMountainBetween(cand, target.pos)) continue;
+                auto key = packCoord(cand);
+                if (cand != self.pos && occ.find(key) != occ.end()) continue;
+                ++count;
+                if (count >= cap) {
+                    return 1.0f;
+                }
+            }
+        }
+        if (cap <= 0) return 0.f;
+        return static_cast<float>(count) / static_cast<float>(cap);
+    }
+
+    struct TargetChoice {
+        const AttackableSnapshot* target = nullptr;
+        float score = -1e30f;
+        float baseOpportunity = 0.f;
+    };
+
+    TargetChoice chooseTarget(const UnitSnapshot& self,
+                              const std::vector<const AttackableSnapshot*>& visible,
+                              const std::vector<UnitSnapshot>& allies,
+                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                              const TargetScoreParams& params,
+                              const Map& map,
+                              const ReachableGrid& reachable,
+                              const std::unordered_set<std::uint64_t>& occ) {
+        TargetChoice best;
+        if (visible.empty()) return best;
+
+        float localThreat = computeLocalThreat(self, visible, kThreatRadius);
+        float hpFrac = (self.maxHp > 0.f) ? (self.hp / self.maxHp) : 1.0f;
+        if (self.commitTimer > 0.f &&
+            hpFrac > params.retreatHpFrac &&
+            localThreat < params.threatRetreat) {
+            for (const auto* v : visible) {
+                if (v && v->key == self.commitTarget) {
+                    best.target = v;
+                    best.score = 0.f;
+                    if (v->isBase) {
+                        best.baseOpportunity = baseOpportunityScore(self, *v, allies, visible,
+                                                                   params, localThreat);
+                    }
+                    return best;
                 }
             }
         }
 
-        if (bestBase) return attackableId(bestBase);
-        return attackableId(bestUnit);
-    }
+        for (const auto* v : visible) {
+            if (!v) continue;
+            float dist = self.pos.mhtDistanceTo(v->pos);
+            float score = 0.f;
+            score += params.distanceWeight * distanceScore(dist);
+            score += params.threatWeight * threatScore(*v);
+            score += params.ttkWeight * ttkScore(self, *v);
+            float hpFrac = (v->maxHp > 0.f) ? (v->hp / v->maxHp) : 1.0f;
+            score += params.executeWeight * (1.0f - hpFrac);
 
-    bool isVisibleTarget(const std::shared_ptr<IAttackable>& target,
-                         const std::vector<std::shared_ptr<IAttackable>>& visible) {
-        if (!target) return false;
-        for (const auto& v : visible) {
-            if (v == target) return true;
+            if (map.hasMountainBetween(self.pos, v->pos)) {
+                score -= params.losPenalty;
+            }
+            float availability = firingPositionAvailability(self, *v, map, reachable,
+                                                             occ, params.availabilityCap);
+            score += params.availabilityWeight * availability;
+            if (availability <= 0.f) {
+                score -= params.unreachablePenalty;
+            }
+
+            if (v->isBase) {
+                float opp = baseOpportunityScore(self, *v, allies, visible, params, localThreat);
+                score += params.baseWeight * basePreference(self.type) * opp;
+                score -= params.baseThreatPenalty * (localThreat / params.threatRetreat);
+            } else {
+                score += params.preferenceWeight * unitPreference(self.type, v->unitType);
+            }
+
+            auto incIt = incomingDamage.find(v->key);
+            if (incIt != incomingDamage.end() && v->maxHp > 0.f) {
+                score -= params.overkillWeight * (incIt->second / v->maxHp);
+            }
+            auto lockIt = lockedCounts.find(v->key);
+            if (lockIt != lockedCounts.end()) {
+                score -= params.lockWeight * static_cast<float>(lockIt->second);
+            }
+
+            if (v->key == self.commitTarget) {
+                score += params.commitBonus;
+            }
+            if (v->key == self.currentTarget) {
+                score += params.commitBonus * 0.5f;
+            }
+
+            bool better = false;
+            if (!best.target) {
+                better = true;
+            } else if (score > best.score + 1e-4f) {
+                better = true;
+            } else if (std::abs(score - best.score) <= 1e-4f) {
+                if (v->key.type < best.target->key.type ||
+                    (v->key.type == best.target->key.type && v->key.id < best.target->key.id)) {
+                    better = true;
+                }
+            }
+
+            if (better) {
+                best.target = v;
+                best.score = score;
+                best.baseOpportunity = v->isBase
+                    ? baseOpportunityScore(self, *v, allies, visible, params, localThreat)
+                    : 0.f;
+            }
         }
-        return false;
+
+        return best;
     }
 
-    AttackIntent planAttackIntent(const Unit& unit,
-                                  const IAttackBehavior& attackBehavior,
-                                  UnitState state,
+    bool inAttackRange(const UnitSnapshot& self,
+                       const Map& map,
+                       const AttackableSnapshot& target) {
+        const Tile& tile = map.getTile(self.pos);
+        float effectiveRange = self.stats.attackRange + tile.getVisionBonus();
+        float dist = self.pos.mhtDistanceTo(target.pos);
+        if (dist > effectiveRange) return false;
+        if (map.hasMountainBetween(self.pos, target.pos)) return false;
+        if (self.stats.attackRange <= 2.0f &&
+            map.hasRiverBetween(self.pos, target.pos)) {
+            return false;
+        }
+        return true;
+    }
+
+    float computeAttackDamage(const UnitSnapshot& self, const Map& map) {
+        const Tile& tile = map.getTile(self.pos);
+        float dmg = self.stats.attack + tile.getAttackBonus();
+        if (tile.getType() == TileType::HILL) {
+            dmg *= 0.85f;
+        }
+        return dmg;
+    }
+
+    float computeAttackCooldown(const UnitSnapshot& self, const Map& map) {
+        const Tile& tile = map.getTile(self.pos);
+        float cdBase = 0.8f;
+        if (tile.getType() == TileType::HILL) {
+            cdBase *= 1.25f;
+        }
+        return cdBase;
+    }
+
+    CombatAction decideCombatAction(const UnitSnapshot& self,
+                                    const AttackableSnapshot* target,
+                                    float dist,
+                                    bool inRange,
+                                    float cdAfter,
+                                    float localThreat,
+                                    float baseOpportunity,
+                                    const ActionParams& params) {
+        if (!target) return CombatAction::None;
+
+        (void)localThreat;
+        float hpFrac = (self.maxHp > 0.f) ? (self.hp / self.maxHp) : 1.0f;
+        if (hpFrac <= params.retreatHpFrac) {
+            return CombatAction::Retreat;
+        }
+        if (target->isBase && baseOpportunity >= params.siegeOpportunity) {
+            return CombatAction::Siege;
+        }
+
+        bool ranged = self.stats.attackRange > 2.5f;
+        if (inRange) {
+            if (ranged && cdAfter > 0.f &&
+                dist <= (self.stats.attackRange - params.kiteMargin)) {
+                return CombatAction::Kite;
+            }
+            return CombatAction::Attack;
+        }
+        return CombatAction::Chase;
+    }
+
+    AttackIntent planAttackIntent(const UnitSnapshot& unit,
                                   float dt,
                                   const Map& map,
-                                  const std::vector<std::weak_ptr<IAttackable>>& enemies,
-                                  const std::vector<std::weak_ptr<IAttackable>>& forcedVisible) {
+                                  const std::vector<AttackableSnapshot>& enemies,
+                                  const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+                                  const std::vector<AttackableKey>& forcedKeys,
+                                  const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                                  const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                                  const std::vector<UnitSnapshot>& allies,
+                                  const std::unordered_set<std::uint64_t>& occ) {
         AttackIntent intent;
         intent.attackerId = unit.id;
-        const float cd = attackBehavior.getCooldown();
-        intent.nextCooldown = cd;
+        intent.nextCooldown = unit.cooldown;
+        intent.nextTargetId = unit.currentTarget.id;
+        intent.nextTargetType = unit.currentTarget.type;
+        intent.nextCommitTimer = std::max(0.0f, unit.commitTimer - dt);
+        intent.nextCommitTargetId = unit.commitTarget.id;
+        intent.nextCommitTargetType = unit.commitTarget.type;
 
-        auto currentTarget = attackBehavior.getTarget().lock();
-        AttackableKey currentKey = attackableKey(currentTarget);
-        intent.nextTargetId = currentKey.id;
-        intent.nextTargetType = currentKey.type;
+        if (unit.hp <= 0.f) return intent;
 
-        if (state != UnitState::Idle &&
-            state != UnitState::Attacking &&
-            state != UnitState::Wandering) {
-            return intent;
+        float cdAfter = std::max(0.0f, unit.cooldown - dt);
+
+        std::vector<const AttackableSnapshot*> visible =
+            collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
+        ReachableGrid reachable = buildReachableGrid(map, unit.pos);
+
+        TargetChoice choice = chooseTarget(unit, visible, allies,
+                                           incomingDamage, lockedCounts,
+                                           kTargetParams, map, reachable,
+                                           occ);
+        const AttackableSnapshot* target = choice.target;
+        if (unit.commandAttackActive && unit.commandTarget.id >= 0) {
+            auto it = enemyIndex.find(unit.commandTarget);
+            if (it != enemyIndex.end()) {
+                target = &enemies[it->second];
+            }
         }
-
-        float cdAfter = cd;
-        if (cdAfter > 0.f) {
-            cdAfter -= dt;
-        }
-
-        std::vector<std::shared_ptr<IAttackable>> visible =
-            collectVisibleEnemies(unit, map, enemies, forcedVisible);
-
-        bool needNewTarget = false;
-        if (!currentTarget) {
-            needNewTarget = true;
-        } else if (currentTarget->isDestroyed()) {
-            needNewTarget = true;
-        } else if (!isVisibleTarget(currentTarget, visible)) {
-            needNewTarget = true;
-        }
-
-        if (needNewTarget) {
-            currentTarget = attackBehavior.findNearest(unit, map, visible);
-        }
-
-        if (!currentTarget) {
+        if (!target) {
             intent.nextCooldown = cdAfter;
             intent.nextTargetId = -1;
+            intent.nextCommitTimer = 0.f;
+            intent.nextCommitTargetId = -1;
+            intent.nextCommitTargetType = AttackableType::UNIT;
+            intent.action = CombatAction::None;
             return intent;
         }
 
-        currentKey = attackableKey(currentTarget);
-        intent.nextTargetId = currentKey.id;
-        intent.nextTargetType = currentKey.type;
+        intent.nextTargetId = target->key.id;
+        intent.nextTargetType = target->key.type;
+        intent.nextCommitTargetId = target->key.id;
+        intent.nextCommitTargetType = target->key.type;
 
-        if (attackBehavior.inAttackRange(unit, map, currentTarget) && cdAfter <= 0.f) {
-            const Tile& tile = map.getTile(unit.getPos());
-            float dmg = unit.baseStats.attack + tile.getAttackBonus();
-            float cdBase = 0.8f;
+        float dist = unit.pos.mhtDistanceTo(target->pos);
+        bool inRange = inAttackRange(unit, map, *target);
+        float localThreat = computeLocalThreat(unit, visible, kThreatRadius);
+        intent.action = decideCombatAction(unit, target, dist, inRange, cdAfter,
+                                           localThreat, choice.baseOpportunity,
+                                           kActionParams);
+        float hpRatio = (unit.maxHp > 0.f) ? (unit.hp / unit.maxHp) : 1.0f;
+        bool enterRetreat = (hpRatio <= kRetreatParams.hpEnter);
+        bool exitRetreat = (hpRatio >= kRetreatParams.hpExit &&
+                            unit.retreatTimer <= 0.f);
+        bool retreatNow = unit.retreating ? !exitRetreat : enterRetreat;
+        if (retreatNow) {
+            intent.action = CombatAction::Retreat;
+        }
+        bool commitSame = (target->key == unit.commitTarget && unit.commitTimer > 0.f);
+        float commitDuration = (intent.action == CombatAction::Siege)
+            ? kTargetParams.siegeHoldTime
+            : kTargetParams.commitDuration;
+        intent.nextCommitTimer = commitSame ? std::max(0.0f, unit.commitTimer - dt)
+                                            : commitDuration;
 
-            if (tile.getType() == TileType::HILL) {
-                dmg *= 0.85f;
-                cdBase *= 1.25f;
-            }
-
+        bool allowRetreatFire = (intent.action != CombatAction::Retreat ||
+                                 localThreat < kRetreatParams.retreatFireThreat);
+        if (inRange && cdAfter <= 0.f && allowRetreatFire) {
             intent.didAttack = true;
-            intent.targetId = intent.nextTargetId;
-            intent.targetType = intent.nextTargetType;
-            intent.damage = dmg;
-            intent.nextCooldown = cdBase;
+            intent.targetId = target->key.id;
+            intent.targetType = target->key.type;
+            intent.damage = computeAttackDamage(unit, map);
+            intent.nextCooldown = computeAttackCooldown(unit, map);
             return intent;
         }
 
@@ -252,8 +666,8 @@ namespace {
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
     }
 
-    float movementSpend(const Unit& unit, const Tile& tile) {
-        float s = unit.baseStats.moveSpeed / tile.getMoveCost();
+    float movementSpend(const UnitSnapshot& unit, const Tile& tile) {
+        float s = unit.stats.moveSpeed / tile.getMoveCost();
         if (unit.type == UnitType::Knight) {
             switch (tile.getType()) {
                 case TileType::PLAIN:  return s * 1.1f;
@@ -266,33 +680,280 @@ namespace {
         return s;
     }
 
-    MoveIntent planMoveIntent(const Unit& unit,
-                              const IMovementBehavior& movement,
-                              UnitState state,
-                              float dt,
-                              const Map& map,
-                              bool commandMove) {
-        MoveIntent intent;
-        intent.unitId = unit.id;
-        intent.from = unit.getPos();
-        intent.to = unit.getPos();
-        intent.commandMove = commandMove;
+    Coord stepAlongManhattan(const Coord& from, const Coord& to, int steps) {
+        Coord out = from;
+        int dx = to.x - from.x;
+        int dy = to.y - from.y;
+        int sx = (dx > 0) - (dx < 0);
+        int sy = (dy > 0) - (dy < 0);
+        int ax = std::abs(dx);
+        int ay = std::abs(dy);
+        int remaining = steps;
+        while (remaining-- > 0 && (ax > 0 || ay > 0)) {
+            if (ax >= ay && ax > 0) {
+                out.x += sx;
+                --ax;
+            } else if (ay > 0) {
+                out.y += sy;
+                --ay;
+            } else {
+                break;
+            }
+        }
+        return out;
+    }
 
-        if (state != UnitState::Moving &&
-            state != UnitState::Chasing &&
-            state != UnitState::Wandering) {
-            return intent;
+    Coord clampToMap(const Map& map, Coord c) {
+        c.x = std::max(0, std::min(c.x, map.getWidth() - 1));
+        c.y = std::max(0, std::min(c.y, map.getHeight() - 1));
+        return c;
+    }
+
+    Coord nearestPassable(const Map& map, Coord c, int radius) {
+        c = clampToMap(map, c);
+        if (map.inBounds(c) && map.getTile(c).isPassable()) {
+            return c;
+        }
+        for (int r = 1; r <= radius; ++r) {
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    Coord cand{c.x + dx, c.y + dy};
+                    if (!map.inBounds(cand)) continue;
+                    if (map.getTile(cand).isPassable()) return cand;
+                }
+            }
+        }
+        return c;
+    }
+
+    float computeThreatAtCoord(const Coord& pos,
+                               const std::vector<AttackableSnapshot>& enemies,
+                               float radius) {
+        float threat = 0.f;
+        for (const auto& e : enemies) {
+            if (e.isBase) continue;
+            if (pos.mhtDistanceTo(e.pos) <= radius) {
+                threat += threatScore(e);
+            }
+        }
+        return threat;
+    }
+
+    Coord chooseSafeSpot(const UnitSnapshot& self,
+                         const Map& map,
+                         const std::vector<AttackableSnapshot>& enemies,
+                         int sampleRadius) {
+        static const std::array<Coord, 12> offsets = {
+            Coord{0, -2}, Coord{2, 0}, Coord{0, 2}, Coord{-2, 0},
+            Coord{2, 2}, Coord{2, -2}, Coord{-2, 2}, Coord{-2, -2},
+            Coord{0, -4}, Coord{4, 0}, Coord{0, 4}, Coord{-4, 0}
+        };
+
+        Coord best = self.pos;
+        float bestThreat = 1e9f;
+        bool found = false;
+
+        for (const auto& off : offsets) {
+            Coord cand{self.pos.x + off.x, self.pos.y + off.y};
+            if (!map.inBounds(cand)) continue;
+            if (std::abs(off.x) > sampleRadius || std::abs(off.y) > sampleRadius) continue;
+            if (!map.getTile(cand).isPassable()) continue;
+            float threat = computeThreatAtCoord(cand, enemies, kThreatRadius);
+            if (!found || threat < bestThreat ||
+                (std::abs(threat - bestThreat) <= 1e-4f &&
+                 (cand.y < best.y || (cand.y == best.y && cand.x < best.x)))) {
+                best = cand;
+                bestThreat = threat;
+                found = true;
+            }
         }
 
-        IMovementBehavior::MovementState nextState = movement.snapshot();
+        if (!found) return self.pos;
+        return best;
+    }
+
+    float computeLocalThreatWorld(const Unit& self,
+                                  const std::vector<std::shared_ptr<Unit>>& enemies,
+                                  float radius) {
+        float threat = 0.f;
+        for (const auto& e : enemies) {
+            if (!e || !e->isAlive()) continue;
+            if (self.getPos().mhtDistanceTo(e->getPos()) <= radius) {
+                threat += e->baseStats.attack * (0.6f + 0.12f * e->baseStats.attackRange);
+            }
+        }
+        return threat;
+    }
+
+    void rebuildPathState(const UnitSnapshot& unit,
+                          const Map& map,
+                          const Coord& target,
+                          IMovementBehavior::MovementState& state) {
+        state.path.clear();
+        map.findPathAStar(unit.pos, target, state.path);
+        state.idx = 0;
+        state.accumulator = 0.f;
+        state.lastTarget = target;
+        state.hasLast = true;
+    }
+
+    MoveIntent planMoveIntent(const UnitSnapshot& unit,
+                              float dt,
+                              const Map& map,
+                              const std::vector<AttackableSnapshot>& enemies,
+                              const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+                              const std::vector<AttackableKey>& forcedKeys,
+                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                              const std::vector<UnitSnapshot>& allies,
+                              bool baseAlive,
+                              const Coord& basePos,
+                              const std::unordered_set<std::uint64_t>& occ) {
+        MoveIntent intent;
+        intent.unitId = unit.id;
+        intent.from = unit.pos;
+        intent.to = unit.pos;
+        intent.commandMove = unit.commandMoveActive;
+
+        IMovementBehavior::MovementState nextState = unit.movementState;
+        Coord desiredTarget = unit.pos;
+        bool hasDesiredTarget = false;
+        MoveReason reason = unit.moveReason;
+        bool retreating = unit.retreating;
+        float retreatTimer = unit.retreatTimer;
+        bool hasAnchor = unit.hasRetreatAnchor;
+        Coord anchor = unit.retreatAnchor;
+
+        if (unit.commandMoveActive) {
+            reason = MoveReason::Command;
+        } else {
+            std::vector<const AttackableSnapshot*> visible =
+                collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
+            ReachableGrid reachable = buildReachableGrid(map, unit.pos);
+            TargetChoice choice = chooseTarget(unit, visible, allies,
+                                               incomingDamage, lockedCounts,
+                                               kTargetParams, map, reachable,
+                                               occ);
+            float localThreat = computeLocalThreat(unit, visible, kThreatRadius);
+            const AttackableSnapshot* target = choice.target;
+            if (unit.commandAttackActive && unit.commandTarget.id >= 0) {
+                auto it = enemyIndex.find(unit.commandTarget);
+                if (it != enemyIndex.end()) {
+                    target = &enemies[it->second];
+                    choice.baseOpportunity = target->isBase
+                        ? baseOpportunityScore(unit, *target, allies, visible,
+                                               kTargetParams, localThreat)
+                        : 0.f;
+                }
+            }
+            float dist = target ? unit.pos.mhtDistanceTo(target->pos) : 0.f;
+            float cdAfter = std::max(0.0f, unit.cooldown - dt);
+            bool inRange = target ? inAttackRange(unit, map, *target) : false;
+            CombatAction action = decideCombatAction(unit, target, dist, inRange, cdAfter,
+                                                     localThreat, choice.baseOpportunity,
+                                                     kActionParams);
+            float hpRatio = (unit.maxHp > 0.f) ? (unit.hp / unit.maxHp) : 1.0f;
+            bool enterRetreat = (hpRatio <= kRetreatParams.hpEnter);
+            bool exitRetreat = (hpRatio >= kRetreatParams.hpExit &&
+                                retreatTimer <= 0.f);
+
+            if (retreating) {
+                if (exitRetreat) {
+                    retreating = false;
+                    retreatTimer = 0.f;
+                    hasAnchor = false;
+                }
+            } else if (enterRetreat) {
+                retreating = true;
+                retreatTimer = kRetreatParams.retreatMinTime;
+                hasAnchor = false;
+            }
+
+            if (retreating) {
+                if (!hasAnchor) {
+                    if (baseAlive) {
+                        anchor = basePos;
+                        hasAnchor = true;
+                    } else {
+                        anchor = chooseSafeSpot(unit, map, enemies, kRetreatParams.sampleRadius);
+                        hasAnchor = true;
+                    }
+                }
+                anchor = nearestPassable(map, anchor, 2);
+                int distToAnchor = unit.pos.mhtDistanceTo(anchor);
+                if (distToAnchor > 0) {
+                    desiredTarget = anchor;
+                    hasDesiredTarget = true;
+                    reason = MoveReason::Retreat;
+                } else {
+                    nextState.path.clear();
+                    nextState.idx = 0;
+                    nextState.accumulator = 0.f;
+                    nextState.hasLast = false;
+                    reason = MoveReason::None;
+                }
+                if (distToAnchor > kRetreatParams.maxRetreatDist) {
+                    desiredTarget = anchor;
+                    hasDesiredTarget = true;
+                    reason = MoveReason::Retreat;
+                }
+            }
+
+            if (!retreating && action == CombatAction::Retreat && target) {
+                int steps = static_cast<int>(std::ceil(kActionParams.kiteExtraDist));
+                Coord awayGoal{unit.pos.x + (unit.pos.x - target->pos.x),
+                               unit.pos.y + (unit.pos.y - target->pos.y)};
+                desiredTarget = stepAlongManhattan(unit.pos, awayGoal, steps);
+                hasDesiredTarget = true;
+                reason = MoveReason::Retreat;
+            } else if (!retreating && action == CombatAction::Kite && target) {
+                int steps = static_cast<int>(std::ceil(kActionParams.kiteExtraDist));
+                Coord awayGoal{unit.pos.x + (unit.pos.x - target->pos.x),
+                               unit.pos.y + (unit.pos.y - target->pos.y)};
+                desiredTarget = stepAlongManhattan(unit.pos, awayGoal, steps);
+                hasDesiredTarget = true;
+                reason = MoveReason::Kite;
+            } else if (!retreating &&
+                       (action == CombatAction::Chase || action == CombatAction::Siege) && target) {
+                int desiredDist = 0;
+                if (unit.stats.attackRange > 2.5f) {
+                    desiredDist = std::max(1, static_cast<int>(std::floor(
+                        unit.stats.attackRange - kActionParams.kiteMargin)));
+                }
+                if (dist > desiredDist) {
+                    desiredTarget = stepAlongManhattan(target->pos, unit.pos, desiredDist);
+                    hasDesiredTarget = true;
+                    reason = (action == CombatAction::Siege) ? MoveReason::Siege : MoveReason::Chase;
+                } else {
+                    nextState.path.clear();
+                    nextState.idx = 0;
+                    nextState.accumulator = 0.f;
+                    nextState.hasLast = false;
+                    reason = MoveReason::None;
+                }
+            }
+        }
+
+        if (hasDesiredTarget) {
+            desiredTarget = clampToMap(map, desiredTarget);
+            if (!nextState.hasLast || nextState.lastTarget != desiredTarget) {
+                rebuildPathState(unit, map, desiredTarget, nextState);
+            }
+        }
+
         if (nextState.path.empty() || nextState.idx >= nextState.path.size()) {
             intent.nextState = std::move(nextState);
             intent.setIdle = true;
+            intent.reason = MoveReason::None;
+            intent.retreating = retreating;
+            intent.retreatTimer = retreatTimer;
+            intent.retreatAnchor = anchor;
+            intent.hasRetreatAnchor = retreating && hasAnchor;
             return intent;
         }
 
-        Coord nextPos = unit.getPos();
-        float sp = movementSpend(unit, map.getTile(unit.getPos()));
+        Coord nextPos = unit.pos;
+        float sp = movementSpend(unit, map.getTile(unit.pos));
         nextState.accumulator += sp * dt;
 
         while (nextState.accumulator >= 1.0f && nextState.idx + 1 < nextState.path.size()) {
@@ -307,6 +968,11 @@ namespace {
         intent.to = nextPos;
         intent.hasMove = (nextPos != intent.from);
         intent.setIdle = nextState.path.empty();
+        intent.reason = intent.setIdle ? MoveReason::None : reason;
+        intent.retreating = retreating;
+        intent.retreatTimer = retreatTimer;
+        intent.retreatAnchor = anchor;
+        intent.hasRetreatAnchor = retreating && hasAnchor;
         intent.nextState = std::move(nextState);
         return intent;
     }
@@ -386,57 +1052,262 @@ void GameWorld::update(float dt) {
     const std::size_t localCount = std::max<std::size_t>(1, taskPool.workerCount());
 
     // Snapshot stage: read-only data for planning.
-    std::vector<std::shared_ptr<Unit>> unitsASnap;
-    std::vector<std::shared_ptr<Unit>> unitsBSnap;
-    std::vector<std::weak_ptr<IAttackable>> enemiesASnap;
-    std::vector<std::weak_ptr<IAttackable>> enemiesBSnap;
-    std::vector<ForcedReveal> forcedASnap;
-    std::vector<ForcedReveal> forcedBSnap;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash> incomingDamageA;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash> incomingDamageB;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash> lockedTargetsA;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash> lockedTargetsB;
+    Coord baseAPos{};
+    Coord baseBPos{};
+    bool baseAAlive = false;
+    bool baseBAlive = false;
+
+    std::vector<UnitSnapshot> unitsASnap;
+    std::vector<UnitSnapshot> unitsBSnap;
+    std::vector<AttackableSnapshot> enemiesASnap;
+    std::vector<AttackableSnapshot> enemiesBSnap;
+    std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash> enemyIndexA;
+    std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash> enemyIndexB;
+    std::vector<AttackableKey> forcedAKeys;
+    std::vector<AttackableKey> forcedBKeys;
+    std::unordered_set<std::uint64_t> occSnap;
     {
         std::shared_lock<std::shared_mutex> lock(worldMutex);
-        unitsASnap = unitsA;
-        unitsBSnap = unitsB;
-        enemiesASnap = enemiesA;
-        enemiesBSnap = enemiesB;
-        forcedASnap = forcedVisibleForA;
-        forcedBSnap = forcedVisibleForB;
+        incomingDamageA = lastIncomingDamageA;
+        incomingDamageB = lastIncomingDamageB;
+        lockedTargetsA = lastLockedTargetsA;
+        lockedTargetsB = lastLockedTargetsB;
+
+        baseAAlive = baseA && !baseA->isDestroyed();
+        baseBAlive = baseB && !baseB->isDestroyed();
+        if (baseAAlive) baseAPos = baseA->pos;
+        if (baseBAlive) baseBPos = baseB->pos;
+
+        occSnap.reserve(unitsA.size() + unitsB.size() + 2);
+        unitsASnap.reserve(unitsA.size());
+        unitsBSnap.reserve(unitsB.size());
+        for (const auto& u : unitsA) {
+            if (!u || !u->isAlive()) continue;
+            occSnap.insert(packCoord(u->pos));
+            UnitSnapshot snap;
+            snap.id = u->id;
+            snap.type = u->type;
+            snap.faction = u->owner;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.stats = u->baseStats;
+            if (u->behavior) {
+                if (auto* attackBehavior = u->behavior->getAttackBehavior()) {
+                    snap.cooldown = attackBehavior->getCooldown();
+                    snap.currentTarget = attackableKey(attackBehavior->getTarget().lock());
+                }
+                if (auto* moveBehavior = u->behavior->getMovementBehavior()) {
+                    snap.movementState = moveBehavior->snapshot();
+                }
+                snap.commitTimer = u->behavior->commitTimer;
+                snap.commitTarget.id = u->behavior->commitTargetId;
+                snap.commitTarget.type = u->behavior->commitTargetType;
+                snap.commandAttackActive = u->behavior->commandAttackActive;
+                snap.commandTarget.id = u->behavior->commandAttackTargetId;
+                snap.commandTarget.type = u->behavior->commandAttackTargetType;
+                snap.retreating = u->behavior->retreating;
+                snap.retreatTimer = u->behavior->retreatTimer;
+                snap.retreatAnchor = u->behavior->retreatAnchor;
+                snap.hasRetreatAnchor = u->behavior->hasRetreatAnchor;
+                snap.timeSinceDamaged = u->behavior->timeSinceDamaged;
+                snap.timeSinceDealtDamage = u->behavior->timeSinceDealtDamage;
+                snap.commandMoveActive = u->behavior->commandMoveActive;
+                snap.locomotionState = u->behavior->locomotionState;
+                snap.combatState = u->behavior->combatState;
+                snap.moveReason = u->behavior->moveReason;
+            }
+            unitsASnap.push_back(std::move(snap));
+        }
+        for (const auto& u : unitsB) {
+            if (!u || !u->isAlive()) continue;
+            occSnap.insert(packCoord(u->pos));
+            UnitSnapshot snap;
+            snap.id = u->id;
+            snap.type = u->type;
+            snap.faction = u->owner;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.stats = u->baseStats;
+            if (u->behavior) {
+                if (auto* attackBehavior = u->behavior->getAttackBehavior()) {
+                    snap.cooldown = attackBehavior->getCooldown();
+                    snap.currentTarget = attackableKey(attackBehavior->getTarget().lock());
+                }
+                if (auto* moveBehavior = u->behavior->getMovementBehavior()) {
+                    snap.movementState = moveBehavior->snapshot();
+                }
+                snap.commitTimer = u->behavior->commitTimer;
+                snap.commitTarget.id = u->behavior->commitTargetId;
+                snap.commitTarget.type = u->behavior->commitTargetType;
+                snap.commandAttackActive = u->behavior->commandAttackActive;
+                snap.commandTarget.id = u->behavior->commandAttackTargetId;
+                snap.commandTarget.type = u->behavior->commandAttackTargetType;
+                snap.retreating = u->behavior->retreating;
+                snap.retreatTimer = u->behavior->retreatTimer;
+                snap.retreatAnchor = u->behavior->retreatAnchor;
+                snap.hasRetreatAnchor = u->behavior->hasRetreatAnchor;
+                snap.timeSinceDamaged = u->behavior->timeSinceDamaged;
+                snap.timeSinceDealtDamage = u->behavior->timeSinceDealtDamage;
+                snap.commandMoveActive = u->behavior->commandMoveActive;
+                snap.locomotionState = u->behavior->locomotionState;
+                snap.combatState = u->behavior->combatState;
+                snap.moveReason = u->behavior->moveReason;
+            }
+            unitsBSnap.push_back(std::move(snap));
+        }
+        if (baseAAlive) occSnap.insert(packCoord(baseAPos));
+        if (baseBAlive) occSnap.insert(packCoord(baseBPos));
+
+        enemiesASnap.reserve(unitsB.size() + 1);
+        for (const auto& u : unitsB) {
+            if (!u || !u->isAlive()) continue;
+            AttackableSnapshot snap;
+            snap.key.id = u->id;
+            snap.key.type = AttackableType::UNIT;
+            snap.type = AttackableType::UNIT;
+            snap.faction = u->owner;
+            snap.unitType = u->type;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.attack = u->baseStats.attack;
+            snap.attackRange = u->baseStats.attackRange;
+            snap.armor = u->baseStats.armor;
+            snap.isBase = false;
+            enemyIndexA[snap.key] = enemiesASnap.size();
+            enemiesASnap.push_back(std::move(snap));
+        }
+        if (baseB && !baseB->isDestroyed()) {
+            AttackableSnapshot snap;
+            snap.key.id = baseB->id;
+            snap.key.type = AttackableType::BASE;
+            snap.type = AttackableType::BASE;
+            snap.faction = baseB->faction;
+            snap.unitType = UnitType::Infantry;
+            snap.pos = baseB->pos;
+            snap.hp = baseB->hp;
+            snap.maxHp = baseB->maxHp;
+            snap.isBase = true;
+            enemyIndexA[snap.key] = enemiesASnap.size();
+            enemiesASnap.push_back(std::move(snap));
+        }
+
+        enemiesBSnap.reserve(unitsA.size() + 1);
+        for (const auto& u : unitsA) {
+            if (!u || !u->isAlive()) continue;
+            AttackableSnapshot snap;
+            snap.key.id = u->id;
+            snap.key.type = AttackableType::UNIT;
+            snap.type = AttackableType::UNIT;
+            snap.faction = u->owner;
+            snap.unitType = u->type;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.attack = u->baseStats.attack;
+            snap.attackRange = u->baseStats.attackRange;
+            snap.armor = u->baseStats.armor;
+            snap.isBase = false;
+            enemyIndexB[snap.key] = enemiesBSnap.size();
+            enemiesBSnap.push_back(std::move(snap));
+        }
+        if (baseA && !baseA->isDestroyed()) {
+            AttackableSnapshot snap;
+            snap.key.id = baseA->id;
+            snap.key.type = AttackableType::BASE;
+            snap.type = AttackableType::BASE;
+            snap.faction = baseA->faction;
+            snap.unitType = UnitType::Infantry;
+            snap.pos = baseA->pos;
+            snap.hp = baseA->hp;
+            snap.maxHp = baseA->maxHp;
+            snap.isBase = true;
+            enemyIndexB[snap.key] = enemiesBSnap.size();
+            enemiesBSnap.push_back(std::move(snap));
+        }
+
+        forcedAKeys.reserve(forcedVisibleForA.size());
+        for (const auto& r : forcedVisibleForA) {
+            auto target = r.target.lock();
+            AttackableKey key = attackableKey(target);
+            if (key.id >= 0) forcedAKeys.push_back(key);
+        }
+        forcedBKeys.reserve(forcedVisibleForB.size());
+        for (const auto& r : forcedVisibleForB) {
+            auto target = r.target.lock();
+            AttackableKey key = attackableKey(target);
+            if (key.id >= 0) forcedBKeys.push_back(key);
+        }
     }
 
-    std::vector<std::weak_ptr<IAttackable>> forcedA;
-    std::vector<std::weak_ptr<IAttackable>> forcedB;
-    forcedA.reserve(forcedASnap.size());
-    forcedB.reserve(forcedBSnap.size());
-    for (const auto& r : forcedASnap) {
-        if (!r.target.expired()) forcedA.push_back(r.target);
+    auto byUnitId = [](const UnitSnapshot& a, const UnitSnapshot& b) {
+        return a.id < b.id;
+    };
+    std::sort(unitsASnap.begin(), unitsASnap.end(), byUnitId);
+    std::sort(unitsBSnap.begin(), unitsBSnap.end(), byUnitId);
+
+    auto byAttackableKey = [](const AttackableSnapshot& a, const AttackableSnapshot& b) {
+        if (a.key.type != b.key.type) return a.key.type < b.key.type;
+        return a.key.id < b.key.id;
+    };
+    std::sort(enemiesASnap.begin(), enemiesASnap.end(), byAttackableKey);
+    std::sort(enemiesBSnap.begin(), enemiesBSnap.end(), byAttackableKey);
+    enemyIndexA.clear();
+    for (std::size_t i = 0; i < enemiesASnap.size(); ++i) {
+        enemyIndexA[enemiesASnap[i].key] = i;
     }
-    for (const auto& r : forcedBSnap) {
-        if (!r.target.expired()) forcedB.push_back(r.target);
+    enemyIndexB.clear();
+    for (std::size_t i = 0; i < enemiesBSnap.size(); ++i) {
+        enemyIndexB[enemiesBSnap[i].key] = i;
     }
+
+    auto keyLess = [](const AttackableKey& a, const AttackableKey& b) {
+        if (a.type != b.type) return a.type < b.type;
+        return a.id < b.id;
+    };
+    std::sort(forcedAKeys.begin(), forcedAKeys.end(), keyLess);
+    forcedAKeys.erase(std::unique(forcedAKeys.begin(), forcedAKeys.end()), forcedAKeys.end());
+    std::sort(forcedBKeys.begin(), forcedBKeys.end(), keyLess);
+    forcedBKeys.erase(std::unique(forcedBKeys.begin(), forcedBKeys.end()), forcedBKeys.end());
 
     // Plan stage (Vision): tasks read snapshots only; no world writes here.
     auto visionGroup = std::make_shared<TaskGroup>();
     std::vector<IntentBuffer> visionLocals(localCount);
 
-    auto scheduleVision = [&](const std::shared_ptr<Unit>& unit,
-                              const std::vector<std::weak_ptr<IAttackable>>& enemies,
-                              const std::vector<std::weak_ptr<IAttackable>>& forced) {
-        if (!unit || !unit->isAlive()) return;
+    auto scheduleVision = [&](const UnitSnapshot& unit,
+                              const std::vector<AttackableSnapshot>& enemies,
+                              const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+                              const std::vector<AttackableKey>& forcedKeys,
+                              const std::vector<UnitSnapshot>& allies,
+                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                              const std::unordered_set<std::uint64_t>& occ) {
+        if (unit.hp <= 0.f) return;
         taskPool.submit([&, unit]() {
-            const int unitId = unit->id;
-            std::vector<std::shared_ptr<IAttackable>> visible =
-                collectVisibleEnemies(*unit, map, enemies, forced);
+            std::vector<const AttackableSnapshot*> visible =
+                collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
+            ReachableGrid reachable = buildReachableGrid(map, unit.pos);
 
             VisionIntent visionIntent;
-            visionIntent.unitId = unitId;
+            visionIntent.unitId = unit.id;
             visionIntent.visibleEnemyIds.reserve(visible.size());
-            for (const auto& e : visible) {
-                int id = attackableId(e);
-                if (id >= 0) visionIntent.visibleEnemyIds.push_back(id);
+            for (const auto* e : visible) {
+                if (e && e->key.id >= 0) visionIntent.visibleEnemyIds.push_back(e->key.id);
             }
 
             TargetHint hint;
-            hint.unitId = unitId;
-            hint.targetId = pickTargetId(*unit, visible);
+            hint.unitId = unit.id;
+            TargetChoice choice = chooseTarget(unit, visible, allies,
+                                               incomingDamage, lockedCounts,
+                                               kTargetParams, map, reachable,
+                                               occ);
+            hint.targetId = choice.target ? choice.target->key.id : -1;
 
             std::size_t idx = TaskPool::workerIndex();
             if (idx == TaskPool::kInvalidWorkerIndex || idx >= visionLocals.size()) {
@@ -449,10 +1320,12 @@ void GameWorld::update(float dt) {
     };
 
     for (const auto& u : unitsASnap) {
-        scheduleVision(u, enemiesASnap, forcedA);
+        scheduleVision(u, enemiesASnap, enemyIndexA, forcedAKeys, unitsASnap,
+                       incomingDamageA, lockedTargetsA, occSnap);
     }
     for (const auto& u : unitsBSnap) {
-        scheduleVision(u, enemiesBSnap, forcedB);
+        scheduleVision(u, enemiesBSnap, enemyIndexB, forcedBKeys, unitsBSnap,
+                       incomingDamageB, lockedTargetsB, occSnap);
     }
     visionGroup->wait();
 
@@ -479,32 +1352,26 @@ void GameWorld::update(float dt) {
         lastTargetHints = std::move(mergedHints);
     }
 
-    // Snapshot stage for Movement planning (post-command).
-    std::vector<std::shared_ptr<Unit>> unitsASnapMove;
-    std::vector<std::shared_ptr<Unit>> unitsBSnapMove;
-    {
-        std::shared_lock<std::shared_mutex> lock(worldMutex);
-        unitsASnapMove = unitsA;
-        unitsBSnapMove = unitsB;
-    }
-
     // Plan stage (Movement): tasks read snapshots only; no world writes here.
     auto moveGroup = std::make_shared<TaskGroup>();
     std::vector<IntentBuffer> moveLocals(localCount);
 
-    auto scheduleMove = [&](const std::shared_ptr<Unit>& unit) {
-        if (!unit || !unit->isAlive() || !unit->behavior) return;
+    auto scheduleMove = [&](const UnitSnapshot& unit,
+                            const std::vector<AttackableSnapshot>& enemies,
+                            const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+                            const std::vector<AttackableKey>& forcedKeys,
+                            const std::vector<UnitSnapshot>& allies,
+                            const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                            const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                            bool baseAlive,
+                            const Coord& basePos,
+                            const std::unordered_set<std::uint64_t>& occ) {
+        if (unit.hp <= 0.f) return;
         taskPool.submit([&, unit]() {
-            const IMovementBehavior* movement = unit->behavior->getMovementBehavior();
-            if (!movement) return;
-            UnitState state = unit->behavior->getState();
-            if (state != UnitState::Moving &&
-                state != UnitState::Chasing &&
-                state != UnitState::Wandering) {
-                return;
-            }
-            bool commandMove = unit->behavior->isCommandMoveActive();
-            MoveIntent intent = planMoveIntent(*unit, *movement, state, dt, map, commandMove);
+            MoveIntent intent = planMoveIntent(unit, dt, map, enemies, enemyIndex,
+                                               forcedKeys, incomingDamage,
+                                               lockedCounts, allies,
+                                               baseAlive, basePos, occ);
 
             std::size_t idx = TaskPool::workerIndex();
             if (idx == TaskPool::kInvalidWorkerIndex || idx >= moveLocals.size()) {
@@ -514,11 +1381,15 @@ void GameWorld::update(float dt) {
         }, moveGroup);
     };
 
-    for (const auto& u : unitsASnapMove) {
-        scheduleMove(u);
+    for (const auto& u : unitsASnap) {
+        scheduleMove(u, enemiesASnap, enemyIndexA, forcedAKeys, unitsASnap,
+                     incomingDamageA, lockedTargetsA, baseAAlive, baseAPos,
+                     occSnap);
     }
-    for (const auto& u : unitsBSnapMove) {
-        scheduleMove(u);
+    for (const auto& u : unitsBSnap) {
+        scheduleMove(u, enemiesBSnap, enemyIndexB, forcedBKeys, unitsBSnap,
+                     incomingDamageB, lockedTargetsB, baseBAlive, baseBPos,
+                     occSnap);
     }
     moveGroup->wait();
 
@@ -560,10 +1431,16 @@ void GameWorld::update(float dt) {
             IMovementBehavior* movement = unit->behavior->getMovementBehavior();
             if (!movement) continue;
             movement->applyState(std::move(intent.nextState));
-            if (intent.setIdle) {
-                unit->behavior->setState(UnitState::Idle);
-                unit->behavior->setCommandMoveActive(false);
-            }
+            unit->behavior->locomotionState =
+                intent.setIdle ? LocomotionState::Idle : LocomotionState::Pathing;
+            unit->behavior->moveReason =
+                intent.setIdle ? MoveReason::None : intent.reason;
+            unit->behavior->commandMoveActive =
+                intent.commandMove && !intent.setIdle;
+            unit->behavior->retreating = intent.retreating;
+            unit->behavior->retreatTimer = intent.retreatTimer;
+            unit->behavior->retreatAnchor = intent.retreatAnchor;
+            unit->behavior->hasRetreatAnchor = intent.hasRetreatAnchor;
         }
 
         struct CoordKey {
@@ -632,50 +1509,210 @@ void GameWorld::update(float dt) {
             unit->pos = to;
             occ.insert(kNow);
         }
+
+        for (auto& unit : allUnits) {
+            if (!unit || !unit->behavior || !unit->isAlive()) continue;
+            if (unit->behavior->retreating) {
+                unit->behavior->retreatTimer =
+                    std::max(0.0f, unit->behavior->retreatTimer - dt);
+            } else {
+                unit->behavior->retreatTimer = 0.f;
+                unit->behavior->hasRetreatAnchor = false;
+            }
+        }
     }
 
     // Snapshot stage for Attack planning (post-move/commands).
-    std::vector<std::shared_ptr<Unit>> unitsASnapAtk;
-    std::vector<std::shared_ptr<Unit>> unitsBSnapAtk;
-    std::vector<std::weak_ptr<IAttackable>> enemiesASnapAtk;
-    std::vector<std::weak_ptr<IAttackable>> enemiesBSnapAtk;
-    std::vector<ForcedReveal> forcedASnapAtk;
-    std::vector<ForcedReveal> forcedBSnapAtk;
+    std::vector<UnitSnapshot> unitsASnapAtk;
+    std::vector<UnitSnapshot> unitsBSnapAtk;
+    std::vector<AttackableSnapshot> enemiesASnapAtk;
+    std::vector<AttackableSnapshot> enemiesBSnapAtk;
+    std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash> enemyIndexAAtk;
+    std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash> enemyIndexBAtk;
+    std::unordered_set<std::uint64_t> occAtk;
     {
         std::shared_lock<std::shared_mutex> lock(worldMutex);
-        unitsASnapAtk = unitsA;
-        unitsBSnapAtk = unitsB;
-        enemiesASnapAtk = enemiesA;
-        enemiesBSnapAtk = enemiesB;
-        forcedASnapAtk = forcedVisibleForA;
-        forcedBSnapAtk = forcedVisibleForB;
+        unitsASnapAtk.reserve(unitsA.size());
+        unitsBSnapAtk.reserve(unitsB.size());
+        for (const auto& u : unitsA) {
+            if (!u || !u->isAlive()) continue;
+            occAtk.insert(packCoord(u->pos));
+            UnitSnapshot snap;
+            snap.id = u->id;
+            snap.type = u->type;
+            snap.faction = u->owner;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.stats = u->baseStats;
+            if (u->behavior) {
+                if (auto* attackBehavior = u->behavior->getAttackBehavior()) {
+                    snap.cooldown = attackBehavior->getCooldown();
+                    snap.currentTarget = attackableKey(attackBehavior->getTarget().lock());
+                }
+                if (auto* moveBehavior = u->behavior->getMovementBehavior()) {
+                    snap.movementState = moveBehavior->snapshot();
+                }
+                snap.commitTimer = u->behavior->commitTimer;
+                snap.commitTarget.id = u->behavior->commitTargetId;
+                snap.commitTarget.type = u->behavior->commitTargetType;
+                snap.commandAttackActive = u->behavior->commandAttackActive;
+                snap.commandTarget.id = u->behavior->commandAttackTargetId;
+                snap.commandTarget.type = u->behavior->commandAttackTargetType;
+                snap.retreating = u->behavior->retreating;
+                snap.retreatTimer = u->behavior->retreatTimer;
+                snap.retreatAnchor = u->behavior->retreatAnchor;
+                snap.hasRetreatAnchor = u->behavior->hasRetreatAnchor;
+                snap.timeSinceDamaged = u->behavior->timeSinceDamaged;
+                snap.timeSinceDealtDamage = u->behavior->timeSinceDealtDamage;
+                snap.commandMoveActive = u->behavior->commandMoveActive;
+                snap.locomotionState = u->behavior->locomotionState;
+                snap.combatState = u->behavior->combatState;
+                snap.moveReason = u->behavior->moveReason;
+            }
+            unitsASnapAtk.push_back(std::move(snap));
+        }
+        for (const auto& u : unitsB) {
+            if (!u || !u->isAlive()) continue;
+            occAtk.insert(packCoord(u->pos));
+            UnitSnapshot snap;
+            snap.id = u->id;
+            snap.type = u->type;
+            snap.faction = u->owner;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.stats = u->baseStats;
+            if (u->behavior) {
+                if (auto* attackBehavior = u->behavior->getAttackBehavior()) {
+                    snap.cooldown = attackBehavior->getCooldown();
+                    snap.currentTarget = attackableKey(attackBehavior->getTarget().lock());
+                }
+                if (auto* moveBehavior = u->behavior->getMovementBehavior()) {
+                    snap.movementState = moveBehavior->snapshot();
+                }
+                snap.commitTimer = u->behavior->commitTimer;
+                snap.commitTarget.id = u->behavior->commitTargetId;
+                snap.commitTarget.type = u->behavior->commitTargetType;
+                snap.commandAttackActive = u->behavior->commandAttackActive;
+                snap.commandTarget.id = u->behavior->commandAttackTargetId;
+                snap.commandTarget.type = u->behavior->commandAttackTargetType;
+                snap.retreating = u->behavior->retreating;
+                snap.retreatTimer = u->behavior->retreatTimer;
+                snap.retreatAnchor = u->behavior->retreatAnchor;
+                snap.hasRetreatAnchor = u->behavior->hasRetreatAnchor;
+                snap.timeSinceDamaged = u->behavior->timeSinceDamaged;
+                snap.timeSinceDealtDamage = u->behavior->timeSinceDealtDamage;
+                snap.commandMoveActive = u->behavior->commandMoveActive;
+                snap.locomotionState = u->behavior->locomotionState;
+                snap.combatState = u->behavior->combatState;
+                snap.moveReason = u->behavior->moveReason;
+            }
+            unitsBSnapAtk.push_back(std::move(snap));
+        }
+        if (baseA && !baseA->isDestroyed()) occAtk.insert(packCoord(baseA->pos));
+        if (baseB && !baseB->isDestroyed()) occAtk.insert(packCoord(baseB->pos));
+
+        enemiesASnapAtk.reserve(unitsB.size() + 1);
+        for (const auto& u : unitsB) {
+            if (!u || !u->isAlive()) continue;
+            AttackableSnapshot snap;
+            snap.key.id = u->id;
+            snap.key.type = AttackableType::UNIT;
+            snap.type = AttackableType::UNIT;
+            snap.faction = u->owner;
+            snap.unitType = u->type;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.attack = u->baseStats.attack;
+            snap.attackRange = u->baseStats.attackRange;
+            snap.armor = u->baseStats.armor;
+            snap.isBase = false;
+            enemyIndexAAtk[snap.key] = enemiesASnapAtk.size();
+            enemiesASnapAtk.push_back(std::move(snap));
+        }
+        if (baseB && !baseB->isDestroyed()) {
+            AttackableSnapshot snap;
+            snap.key.id = baseB->id;
+            snap.key.type = AttackableType::BASE;
+            snap.type = AttackableType::BASE;
+            snap.faction = baseB->faction;
+            snap.unitType = UnitType::Infantry;
+            snap.pos = baseB->pos;
+            snap.hp = baseB->hp;
+            snap.maxHp = baseB->maxHp;
+            snap.isBase = true;
+            enemyIndexAAtk[snap.key] = enemiesASnapAtk.size();
+            enemiesASnapAtk.push_back(std::move(snap));
+        }
+
+        enemiesBSnapAtk.reserve(unitsA.size() + 1);
+        for (const auto& u : unitsA) {
+            if (!u || !u->isAlive()) continue;
+            AttackableSnapshot snap;
+            snap.key.id = u->id;
+            snap.key.type = AttackableType::UNIT;
+            snap.type = AttackableType::UNIT;
+            snap.faction = u->owner;
+            snap.unitType = u->type;
+            snap.pos = u->pos;
+            snap.hp = u->hp;
+            snap.maxHp = u->baseStats.maxHP;
+            snap.attack = u->baseStats.attack;
+            snap.attackRange = u->baseStats.attackRange;
+            snap.armor = u->baseStats.armor;
+            snap.isBase = false;
+            enemyIndexBAtk[snap.key] = enemiesBSnapAtk.size();
+            enemiesBSnapAtk.push_back(std::move(snap));
+        }
+        if (baseA && !baseA->isDestroyed()) {
+            AttackableSnapshot snap;
+            snap.key.id = baseA->id;
+            snap.key.type = AttackableType::BASE;
+            snap.type = AttackableType::BASE;
+            snap.faction = baseA->faction;
+            snap.unitType = UnitType::Infantry;
+            snap.pos = baseA->pos;
+            snap.hp = baseA->hp;
+            snap.maxHp = baseA->maxHp;
+            snap.isBase = true;
+            enemyIndexBAtk[snap.key] = enemiesBSnapAtk.size();
+            enemiesBSnapAtk.push_back(std::move(snap));
+        }
     }
 
-    std::vector<std::weak_ptr<IAttackable>> forcedAAtk;
-    std::vector<std::weak_ptr<IAttackable>> forcedBAtk;
-    forcedAAtk.reserve(forcedASnapAtk.size());
-    forcedBAtk.reserve(forcedBSnapAtk.size());
-    for (const auto& r : forcedASnapAtk) {
-        if (!r.target.expired()) forcedAAtk.push_back(r.target);
+    std::sort(unitsASnapAtk.begin(), unitsASnapAtk.end(), byUnitId);
+    std::sort(unitsBSnapAtk.begin(), unitsBSnapAtk.end(), byUnitId);
+    std::sort(enemiesASnapAtk.begin(), enemiesASnapAtk.end(), byAttackableKey);
+    std::sort(enemiesBSnapAtk.begin(), enemiesBSnapAtk.end(), byAttackableKey);
+    enemyIndexAAtk.clear();
+    for (std::size_t i = 0; i < enemiesASnapAtk.size(); ++i) {
+        enemyIndexAAtk[enemiesASnapAtk[i].key] = i;
     }
-    for (const auto& r : forcedBSnapAtk) {
-        if (!r.target.expired()) forcedBAtk.push_back(r.target);
+    enemyIndexBAtk.clear();
+    for (std::size_t i = 0; i < enemiesBSnapAtk.size(); ++i) {
+        enemyIndexBAtk[enemiesBSnapAtk[i].key] = i;
     }
 
     // Plan stage (Attack): tasks read snapshots only; no world writes here.
     auto attackGroup = std::make_shared<TaskGroup>();
     std::vector<IntentBuffer> attackLocals(localCount);
 
-    auto scheduleAttack = [&](const std::shared_ptr<Unit>& unit,
-                              const std::vector<std::weak_ptr<IAttackable>>& enemies,
-                              const std::vector<std::weak_ptr<IAttackable>>& forced) {
-        if (!unit || !unit->isAlive() || !unit->behavior) return;
+    auto scheduleAttack = [&](const UnitSnapshot& unit,
+                              const std::vector<AttackableSnapshot>& enemies,
+                              const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+                              const std::vector<AttackableKey>& forcedKeys,
+                              const std::vector<UnitSnapshot>& allies,
+                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+                              const std::unordered_set<std::uint64_t>& occ) {
+        if (unit.hp <= 0.f) return;
         taskPool.submit([&, unit]() {
-            const IAttackBehavior* attackBehavior = unit->behavior->getAttackBehavior();
-            if (!attackBehavior) return;
-            UnitState state = unit->behavior->getState();
-            AttackIntent intent = planAttackIntent(*unit, *attackBehavior, state, dt, map,
-                                                   enemies, forced);
+            AttackIntent intent = planAttackIntent(unit, dt, map, enemies,
+                                                   enemyIndex, forcedKeys,
+                                                   incomingDamage, lockedCounts,
+                                                   allies, occ);
 
             std::size_t idx = TaskPool::workerIndex();
             if (idx == TaskPool::kInvalidWorkerIndex || idx >= attackLocals.size()) {
@@ -686,10 +1723,12 @@ void GameWorld::update(float dt) {
     };
 
     for (const auto& u : unitsASnapAtk) {
-        scheduleAttack(u, enemiesASnapAtk, forcedAAtk);
+        scheduleAttack(u, enemiesASnapAtk, enemyIndexAAtk, forcedAKeys, unitsASnapAtk,
+                       incomingDamageA, lockedTargetsA, occAtk);
     }
     for (const auto& u : unitsBSnapAtk) {
-        scheduleAttack(u, enemiesBSnapAtk, forcedBAtk);
+        scheduleAttack(u, enemiesBSnapAtk, enemyIndexBAtk, forcedBKeys, unitsBSnapAtk,
+                       incomingDamageB, lockedTargetsB, occAtk);
     }
     attackGroup->wait();
 
@@ -704,6 +1743,17 @@ void GameWorld::update(float dt) {
                   [](const std::shared_ptr<Unit>& a, const std::shared_ptr<Unit>& b) {
                       return a->id < b->id;
                   });
+
+        std::vector<std::weak_ptr<IAttackable>> forcedAAtk;
+        std::vector<std::weak_ptr<IAttackable>> forcedBAtk;
+        forcedAAtk.reserve(forcedVisibleForA.size());
+        forcedBAtk.reserve(forcedVisibleForB.size());
+        for (const auto& r : forcedVisibleForA) {
+            if (!r.target.expired()) forcedAAtk.push_back(r.target);
+        }
+        for (const auto& r : forcedVisibleForB) {
+            if (!r.target.expired()) forcedBAtk.push_back(r.target);
+        }
 
         for (auto& u : allUnits) {
             if (!u || !u->behavior) continue;
@@ -727,14 +1777,23 @@ void GameWorld::update(float dt) {
         auto resolveTarget = [&](int id, AttackableType type) -> std::shared_ptr<IAttackable> {
             if (id < 0) return nullptr;
             if (type == AttackableType::BASE) {
-                return findBase(id, Faction::A);
+                auto base = findBase(id, Faction::A);
+                if (!base) base = findBase(id, Faction::B);
+                return base;
             }
             return findUnit(id);
         };
 
         std::map<std::pair<int, int>, float> damageByTarget;
+        std::unordered_map<AttackableKey, float, AttackableKeyHash> incomingDamageAFrame;
+        std::unordered_map<AttackableKey, float, AttackableKeyHash> incomingDamageBFrame;
+        std::unordered_map<AttackableKey, int, AttackableKeyHash> lockedTargetsAFrame;
+        std::unordered_map<AttackableKey, int, AttackableKeyHash> lockedTargetsBFrame;
         std::vector<int> attackersToReveal;
+        std::vector<int> attackersDealtDamage;
+        std::vector<int> damagedUnits;
         attackersToReveal.reserve(mergedAttacks.size());
+        attackersDealtDamage.reserve(mergedAttacks.size());
 
         for (const auto& intent : mergedAttacks) {
             auto attacker = findUnit(intent.attackerId);
@@ -751,10 +1810,44 @@ void GameWorld::update(float dt) {
                 attackBehavior->setTarget(std::weak_ptr<IAttackable>{});
             }
 
+            if (intent.nextTargetId >= 0) {
+                AttackableKey key;
+                key.id = intent.nextTargetId;
+                key.type = intent.nextTargetType;
+                if (attacker->getFaction() == Faction::A) {
+                    lockedTargetsAFrame[key] += 1;
+                } else {
+                    lockedTargetsBFrame[key] += 1;
+                }
+                attacker->behavior->combatState = CombatState::Engaging;
+                attacker->behavior->combatAction = intent.action;
+            } else {
+                attacker->behavior->combatState = CombatState::None;
+                attacker->behavior->combatAction = CombatAction::None;
+            }
+            attacker->behavior->commitTimer = intent.nextCommitTimer;
+            attacker->behavior->commitTargetId = intent.nextCommitTargetId;
+            attacker->behavior->commitTargetType = intent.nextCommitTargetType;
+
             if (intent.didAttack && intent.targetId >= 0) {
                 auto key = std::make_pair(static_cast<int>(intent.targetType), intent.targetId);
                 damageByTarget[key] += intent.damage;
                 attackersToReveal.push_back(intent.attackerId);
+                AttackableKey dmgKey;
+                dmgKey.id = intent.targetId;
+                dmgKey.type = intent.targetType;
+                if (attacker->getFaction() == Faction::A) {
+                    incomingDamageAFrame[dmgKey] += intent.damage;
+                } else {
+                    incomingDamageBFrame[dmgKey] += intent.damage;
+                }
+                auto damageTarget = resolveTarget(intent.targetId, intent.targetType);
+                if (damageTarget) {
+                    attackersDealtDamage.push_back(intent.attackerId);
+                    if (intent.targetType == AttackableType::UNIT) {
+                        damagedUnits.push_back(intent.targetId);
+                    }
+                }
             }
         }
 
@@ -784,6 +1877,45 @@ void GameWorld::update(float dt) {
             const auto& enemies = (u->getFaction() == Faction::A) ? enemiesA : enemiesB;
             u->behavior->postAttackStateUpdate(*u, map, enemies);
         }
+
+        std::sort(attackersDealtDamage.begin(), attackersDealtDamage.end());
+        attackersDealtDamage.erase(
+            std::unique(attackersDealtDamage.begin(), attackersDealtDamage.end()),
+            attackersDealtDamage.end()
+        );
+        std::sort(damagedUnits.begin(), damagedUnits.end());
+        damagedUnits.erase(
+            std::unique(damagedUnits.begin(), damagedUnits.end()),
+            damagedUnits.end()
+        );
+
+        for (auto& u : allUnits) {
+            if (!u || !u->behavior || !u->isAlive()) continue;
+            u->behavior->timeSinceDamaged += dt;
+            u->behavior->timeSinceDealtDamage += dt;
+
+            if (std::binary_search(damagedUnits.begin(), damagedUnits.end(), u->id)) {
+                u->behavior->timeSinceDamaged = 0.f;
+            }
+            if (std::binary_search(attackersDealtDamage.begin(), attackersDealtDamage.end(), u->id)) {
+                u->behavior->timeSinceDealtDamage = 0.f;
+            }
+
+            if (u->behavior->timeSinceDamaged > kOocParams.delay &&
+                u->behavior->timeSinceDealtDamage > kOocParams.delay) {
+                const auto& enemyUnits = (u->getFaction() == Faction::A) ? unitsB : unitsA;
+                float threat = computeLocalThreatWorld(*u, enemyUnits, kThreatRadius);
+                if (threat < kOocParams.threatThreshold) {
+                    float regen = u->baseStats.maxHP * kOocParams.regenRate * dt;
+                    u->hp = std::min(u->baseStats.maxHP, u->hp + regen);
+                }
+            }
+        }
+
+        lastIncomingDamageA = std::move(incomingDamageAFrame);
+        lastIncomingDamageB = std::move(incomingDamageBFrame);
+        lastLockedTargetsA = std::move(lockedTargetsAFrame);
+        lastLockedTargetsB = std::move(lockedTargetsBFrame);
 
         // std::cout << "  CleanupSystem...\n";
         cleanupSystem.update(*this);

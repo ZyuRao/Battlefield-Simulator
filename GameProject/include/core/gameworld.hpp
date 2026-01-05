@@ -121,6 +121,23 @@ struct TargetHint {
     int targetId = -1;
 };
 
+struct AttackableKey {
+    int id = -1;
+    AttackableType type = AttackableType::UNIT;
+
+    bool operator==(const AttackableKey& other) const {
+        return id == other.id && type == other.type;
+    }
+};
+
+struct AttackableKeyHash {
+    std::size_t operator()(const AttackableKey& key) const {
+        std::size_t h1 = std::hash<int>{}(key.id);
+        std::size_t h2 = std::hash<int>{}(static_cast<int>(key.type));
+        return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6) + (h1 >> 2));
+    }
+};
+
 struct MoveIntent {
     int unitId = -1;
     Coord from{};
@@ -128,6 +145,11 @@ struct MoveIntent {
     bool hasMove = false;
     bool commandMove = false;
     bool setIdle = false;
+    MoveReason reason = MoveReason::None;
+    bool retreating = false;
+    float retreatTimer = 0.f;
+    Coord retreatAnchor{};
+    bool hasRetreatAnchor = false;
     IMovementBehavior::MovementState nextState;
 };
 
@@ -139,6 +161,10 @@ struct AttackIntent {
     int nextTargetId = -1;
     AttackableType nextTargetType = AttackableType::UNIT;
     float nextCooldown = 0.f;
+    float nextCommitTimer = 0.f;
+    int nextCommitTargetId = -1;
+    AttackableType nextCommitTargetType = AttackableType::UNIT;
+    CombatAction action = CombatAction::None;
     bool didAttack = false;
 };
 
@@ -356,6 +382,10 @@ private:
     std::vector<ForcedReveal> forcedVisibleForB;
     std::vector<VisionIntent> lastVisionIntents;
     std::vector<TargetHint>   lastTargetHints;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash> lastIncomingDamageA;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash> lastIncomingDamageB;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash> lastLockedTargetsA;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash> lastLockedTargetsB;
 
     
     friend class TaskPool;

@@ -65,6 +65,44 @@ namespace {
 
         return best;
     }
+
+    void fillCommitTarget(const std::shared_ptr<IAttackable>& target,
+                          int& outId,
+                          AttackableType& outType) {
+        outId = -1;
+        outType = AttackableType::UNIT;
+        if (!target) return;
+        outType = target->getAttackType();
+        if (outType == AttackableType::BASE) {
+            auto basePtr = std::dynamic_pointer_cast<Base>(target);
+            outId = basePtr ? basePtr->getId() : -1;
+        } else {
+            auto unitPtr = std::dynamic_pointer_cast<Unit>(target);
+            outId = unitPtr ? unitPtr->getId() : -1;
+        }
+    }
+
+    UnitState mapLegacyState(LifeState life,
+                             LocomotionState locomotion,
+                             CombatState combat,
+                             MoveReason moveReason,
+                             CombatAction combatAction) {
+        if (life == LifeState::Dead) return UnitState::Dead;
+        if (combat == CombatState::Engaging) {
+            if (locomotion == LocomotionState::Pathing) {
+                return UnitState::Chasing;
+            }
+            if (combatAction == CombatAction::Attack) {
+                return UnitState::Attacking;
+            }
+            return UnitState::Attacking;
+        }
+        if (locomotion == LocomotionState::Pathing) {
+            if (moveReason == MoveReason::Wander) return UnitState::Wandering;
+            return UnitState::Moving;
+        }
+        return UnitState::Idle;
+    }
 }
 
 static float terrainSpend(Unit& u, const Tile& tile) {
@@ -309,7 +347,7 @@ void UnitBehavior::issueAttack(const std::shared_ptr<IAttackable>& t) { command-
 void UnitBehavior::issueStop() { command->issueStop(); }
 
 bool UnitBehavior::isDead() const {
-    return stateMachine->get() == UnitState::Dead;
+    return lifeState == LifeState::Dead;
 }
 
 UnitState UnitBehavior::getState() const {
@@ -318,10 +356,69 @@ UnitState UnitBehavior::getState() const {
 
 void UnitBehavior::setState(UnitState state) {
     stateMachine->set(state);
+    switch (state) {
+        case UnitState::Dead:
+            lifeState = LifeState::Dead;
+            locomotionState = LocomotionState::Idle;
+            combatState = CombatState::None;
+            moveReason = MoveReason::None;
+            combatAction = CombatAction::None;
+            break;
+        case UnitState::Attacking:
+            lifeState = LifeState::Alive;
+            combatState = CombatState::Engaging;
+            combatAction = CombatAction::Attack;
+            locomotionState = LocomotionState::Idle;
+            moveReason = MoveReason::None;
+            break;
+        case UnitState::Chasing:
+            lifeState = LifeState::Alive;
+            combatState = CombatState::Engaging;
+            combatAction = CombatAction::Chase;
+            locomotionState = LocomotionState::Pathing;
+            moveReason = MoveReason::Chase;
+            break;
+        case UnitState::Moving:
+            lifeState = LifeState::Alive;
+            locomotionState = LocomotionState::Pathing;
+            moveReason = MoveReason::Command;
+            combatState = CombatState::None;
+            combatAction = CombatAction::None;
+            break;
+        case UnitState::Wandering:
+            lifeState = LifeState::Alive;
+            locomotionState = LocomotionState::Pathing;
+            moveReason = MoveReason::Wander;
+            combatState = CombatState::None;
+            combatAction = CombatAction::None;
+            break;
+        case UnitState::Idle:
+        default:
+            lifeState = LifeState::Alive;
+            locomotionState = LocomotionState::Idle;
+            combatState = CombatState::None;
+            moveReason = MoveReason::None;
+            combatAction = CombatAction::None;
+            break;
+    }
 }
 
 void UnitBehavior::onKilled(Unit& u) {
     stateMachine->set(UnitState::Dead);
+    lifeState = LifeState::Dead;
+    locomotionState = LocomotionState::Idle;
+    combatState = CombatState::None;
+    moveReason = MoveReason::None;
+    combatAction = CombatAction::None;
+    commitTimer = 0.f;
+    commitTargetId = -1;
+    commitTargetType = AttackableType::UNIT;
+    commandAttackActive = false;
+    commandAttackTargetId = -1;
+    commandAttackTargetType = AttackableType::UNIT;
+    retreating = false;
+    retreatTimer = 0.f;
+    hasRetreatAnchor = false;
 }
 
 
@@ -340,16 +437,56 @@ void UnitBehavior::applyPendingCommand(Unit& u, const Map& map) {
     switch (command->pendingType()) {
         case UnitCommandType::MoveTo:
             movement->setMoveTarget(command->pendingMoveTarget(), map, u);
+            locomotionState = LocomotionState::Pathing;
+            moveReason = MoveReason::Command;
+            combatState = CombatState::None;
+            combatAction = CombatAction::None;
+            commitTimer = 0.f;
+            commitTargetId = -1;
+            commitTargetType = AttackableType::UNIT;
+            commandAttackActive = false;
+            commandAttackTargetId = -1;
+            commandAttackTargetType = AttackableType::UNIT;
+            retreating = false;
+            retreatTimer = 0.f;
+            hasRetreatAnchor = false;
             stateMachine->set(UnitState::Moving);
             commandMoveActive = true;
             break;
         case UnitCommandType::AttackUnit:
             attack->setTarget(command->pendingAttackTarget());
+            combatState = CombatState::Engaging;
+            combatAction = CombatAction::Attack;
+            locomotionState = LocomotionState::Idle;
+            moveReason = MoveReason::None;
+            {
+                auto target = command->pendingAttackTarget().lock();
+                fillCommitTarget(target, commitTargetId, commitTargetType);
+                commitTimer = 1.2f;
+                commandAttackActive = true;
+                fillCommitTarget(target, commandAttackTargetId, commandAttackTargetType);
+            }
+            retreating = false;
+            retreatTimer = 0.f;
+            hasRetreatAnchor = false;
             stateMachine->set(UnitState::Attacking);
             commandMoveActive = false;
             break;
         case UnitCommandType::Stop:
             movement->usePath().clear();
+            locomotionState = LocomotionState::Idle;
+            combatState = CombatState::None;
+            moveReason = MoveReason::None;
+            combatAction = CombatAction::None;
+            commitTimer = 0.f;
+            commitTargetId = -1;
+            commitTargetType = AttackableType::UNIT;
+            commandAttackActive = false;
+            commandAttackTargetId = -1;
+            commandAttackTargetType = AttackableType::UNIT;
+            retreating = false;
+            retreatTimer = 0.f;
+            hasRetreatAnchor = false;
             stateMachine->set(UnitState::Idle);
             commandMoveActive = false;
             break;
@@ -370,12 +507,12 @@ void UnitBehavior::updateVision(Unit& u, const Map& map,
 void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
     if(isDead()) return;
 
-    UnitState st = stateMachine->get();
-
-    if(st == UnitState::Moving || st == UnitState::Chasing || st == UnitState::Wandering) {
+    if(locomotionState == LocomotionState::Pathing) {
         movement->update(u, dt, map);
 
         if(movement->usePath().empty()) {
+            locomotionState = LocomotionState::Idle;
+            moveReason = MoveReason::None;
             stateMachine->set(UnitState::Idle);
         }
     }
@@ -483,69 +620,19 @@ void UnitBehavior::postAttackStateUpdate(
     const std::vector<std::weak_ptr<IAttackable>>& enemies
 ) {
     if (isDead()) return;
+    stateMachine->set(mapLegacyState(lifeState, locomotionState, combatState,
+                                     moveReason, combatAction));
 
-    UnitState st = stateMachine->get();
-
-    switch (st) {
-        case UnitState::Idle: {
-            auto tWeak = attack->getTarget();
-            if (!tWeak.expired()) {
-                stateMachine->set(UnitState::Attacking);
-                commandMoveActive = false;
-                break;
-            }
-            Coord dst = pickRandomWanderTarget(u, map, enemies, rng);
-            movement->setMoveTarget(dst, map, u);
-            stateMachine->set(UnitState::Wandering);
-            commandMoveActive = false;
-            break;
-        }
-        case UnitState::Attacking: {
-            auto t = attack->getTarget().lock();
-            if (!t || t->isDestroyed()) {
-                stateMachine->set(UnitState::Idle);
-                commandMoveActive = false;
-                break;
-            }
-            if (!attack->inAttackRange(u, map, t)) {
-                stateMachine->set(UnitState::Chasing);
-                movement->setMoveTarget(t->getPos(), map, u);
-                commandMoveActive = false;
-            }
-            break;
-        }
-        case UnitState::Chasing: {
-            auto t = attack->getTarget().lock();
-            if (!t || t->isDestroyed()) {
-                stateMachine->set(UnitState::Idle);
-                commandMoveActive = false;
-                break;
-            }
-            Coord curTargetPos = t->getPos();
-            if (attack->inAttackRange(u, map, t)) {
-                stateMachine->set(UnitState::Attacking);
-                commandMoveActive = false;
-                break;
-            }
-            if (!movement->hasLastTarget() ||
-                movement->getLastTarget() != curTargetPos)
-            {
-                movement->setMoveTarget(curTargetPos, map, u);
-                movement->setLastTarget(curTargetPos);
-                commandMoveActive = false;
-            }
-            break;
-        }
-        case UnitState::Wandering: {
-            auto tWeak = attack->getTarget();
-            if (!tWeak.expired()) {
-                stateMachine->set(UnitState::Attacking);
-                commandMoveActive = false;
-            }
-            break;
-        }
-        default:
-            break;
+    if (locomotionState == LocomotionState::Idle &&
+        combatState == CombatState::None &&
+        !commandMoveActive &&
+        !retreating)
+    {
+        Coord dst = pickRandomWanderTarget(u, map, enemies, rng);
+        movement->setMoveTarget(dst, map, u);
+        locomotionState = LocomotionState::Pathing;
+        moveReason = MoveReason::Wander;
+        stateMachine->set(UnitState::Wandering);
     }
 }
 

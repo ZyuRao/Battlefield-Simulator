@@ -30,6 +30,40 @@ enum class UnitState {
     Dead
 };
 
+enum class LifeState {
+    Alive,
+    Dead
+};
+
+enum class LocomotionState {
+    Idle,
+    Pathing
+};
+
+enum class CombatState {
+    None,
+    Engaging
+};
+
+enum class MoveReason {
+    None,
+    Command,
+    Wander,
+    Chase,
+    Kite,
+    Retreat,
+    Siege
+};
+
+enum class CombatAction {
+    None,
+    Attack,
+    Chase,
+    Kite,
+    Retreat,
+    Siege
+};
+
 enum class UnitCommandType {
     None,
     MoveTo,
@@ -224,6 +258,23 @@ private:
     std::unique_ptr<IVisionBehavior> vision;
     std::unique_ptr<IStateMachine> stateMachine;
     bool commandMoveActive = false;
+    bool commandAttackActive = false;
+    int commandAttackTargetId = -1;
+    AttackableType commandAttackTargetType = AttackableType::UNIT;
+    LifeState lifeState = LifeState::Alive;
+    LocomotionState locomotionState = LocomotionState::Idle;
+    CombatState combatState = CombatState::None;
+    MoveReason moveReason = MoveReason::None;
+    CombatAction combatAction = CombatAction::None;
+    float commitTimer = 0.f;
+    int commitTargetId = -1;
+    AttackableType commitTargetType = AttackableType::UNIT;
+    bool retreating = false;
+    float retreatTimer = 0.f;
+    Coord retreatAnchor{};
+    bool hasRetreatAnchor = false;
+    float timeSinceDamaged = 0.f;
+    float timeSinceDealtDamage = 0.f;
 
 public:
     UnitBehavior();
@@ -256,6 +307,8 @@ public:
     const IMovementBehavior* getMovementBehavior() const { return movement.get(); }
     bool isCommandMoveActive() const { return commandMoveActive; }
     void setCommandMoveActive(bool value) { commandMoveActive = value; }
+
+    friend class GameWorld;
 };
 
 
