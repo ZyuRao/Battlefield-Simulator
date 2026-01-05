@@ -5,6 +5,7 @@
 #include <memory>
 #include <queue>
 #include <array>
+#include <cstddef>
 #include "utils/vec2.hpp"
 #include "Iattackable.hpp"
 
@@ -108,6 +109,17 @@ public:
     virtual Coord getLastTarget() const = 0;
     virtual bool hasLastTarget() const = 0;
     virtual void setLastTarget(const Coord& c) = 0;
+
+    struct MovementState {
+        std::vector<Coord> path;
+        std::size_t idx = 0;
+        float accumulator = 0.f;
+        Coord lastTarget{};
+        bool hasLast = false;
+    };
+
+    virtual MovementState snapshot() const = 0;
+    virtual void applyState(MovementState state) = 0;
 };
 
 class DefaultMovementBehavior : public IMovementBehavior {
@@ -127,6 +139,8 @@ public:
         hasLast = true;
     }
     std::vector<Coord>& usePath() { return path; }
+    MovementState snapshot() const override;
+    void applyState(MovementState state) override;
 };
 
 /*====================================
@@ -137,6 +151,8 @@ public:
     virtual ~IAttackBehavior() = default;
     virtual void setTarget(const std::weak_ptr<IAttackable>& t) = 0;
     virtual std::weak_ptr<IAttackable> getTarget() const = 0;
+    virtual float getCooldown() const = 0;
+    virtual void setCooldown(float value) = 0;
     virtual void update(Unit& u, float dt, const Map& map, 
                         const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
                         GameWorld& world) = 0;
@@ -163,6 +179,8 @@ public:
                        const Map& map,
                        const std::shared_ptr<IAttackable>& t) const;
     std::weak_ptr<IAttackable> getTarget() const override {return target; }
+    float getCooldown() const override { return cd; }
+    void setCooldown(float value) override { cd = value; }
     void setTarget(const std::weak_ptr<IAttackable>& t) override;
     void update(Unit& u, float dt, const Map& map,
                 const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
@@ -205,6 +223,7 @@ private:
     std::unique_ptr<ICommandBehavior> command;
     std::unique_ptr<IVisionBehavior> vision;
     std::unique_ptr<IStateMachine> stateMachine;
+    bool commandMoveActive = false;
 
 public:
     UnitBehavior();
@@ -223,6 +242,20 @@ public:
     void tickAttack(Unit& u, float dt, const Map& map,
         const std::vector<std::weak_ptr<IAttackable>>& visibleEnemies,
         GameWorld& world);
+    UnitState getState() const;
+    void setState(UnitState state);
+    void applyPendingCommand(Unit& u, const Map& map);
+    void updateVision(Unit& u, const Map& map,
+                      const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                      const std::vector<std::weak_ptr<IAttackable>>& forcedVisible);
+    void postAttackStateUpdate(Unit& u, const Map& map,
+                               const std::vector<std::weak_ptr<IAttackable>>& enemies);
+    IAttackBehavior* getAttackBehavior() { return attack.get(); }
+    const IAttackBehavior* getAttackBehavior() const { return attack.get(); }
+    IMovementBehavior* getMovementBehavior() { return movement.get(); }
+    const IMovementBehavior* getMovementBehavior() const { return movement.get(); }
+    bool isCommandMoveActive() const { return commandMoveActive; }
+    void setCommandMoveActive(bool value) { commandMoveActive = value; }
 };
 
 

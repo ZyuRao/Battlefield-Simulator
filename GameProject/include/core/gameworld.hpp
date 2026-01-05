@@ -14,6 +14,8 @@
 #include <array>
 #include <cstddef>
 #include <unordered_map>
+#include <mutex>
+#include <queue>
 #ifdef _WIN32
     #include <windows.h>
 #endif
@@ -35,28 +37,50 @@ public:
     float getDeltaTime() const { return deltatime; }
 };
 
+class TaskGroup {
+private:
+    std::atomic<int> count{0};
+    std::atomic<bool> alive{true};
+    std::mutex mutex;
+    std::condition_variable cv;
+
+public:
+    ~TaskGroup();
+    void add(int n = 1);
+    void done();
+    void wait();
+    bool isAlive() const { return alive.load(std::memory_order_acquire); }
+    int debugCount() const { return count.load(std::memory_order_acquire); }
+};
+
 class TaskPool {
 public:
-    using Job = std::function<void(GameWorld&)>;
+    using Job = std::function<void()>;
+    static constexpr std::size_t kInvalidWorkerIndex =
+        static_cast<std::size_t>(-1);
 private:
-    GameWorld* worldPtr = nullptr;
     std::vector<std::thread> workers;
     std::queue<Job>          jobs;
     std::mutex               queueMutex;
     std::condition_variable  cv;
     std::atomic<bool>        stopping;
+    std::size_t              requestedThreads = 0;
+    std::atomic<bool>        initialized{false};
+    static thread_local std::size_t tlsWorkerIndex;
 
-    void workerLoop();
+    void workerLoop(std::size_t workerIndex);
 
 public:
     TaskPool();
     TaskPool(std::size_t threadCount = 0);
     ~TaskPool();
 
-    void submit(Job job);
+    void submit(Job job, std::shared_ptr<TaskGroup> group = nullptr);
 
     void shutdown();
-    void init(GameWorld* world);
+    void init();
+    std::size_t workerCount() const { return workers.size(); }
+    static std::size_t workerIndex();
 };
 
 class MovementSystem {
@@ -85,6 +109,59 @@ public:
     CleanupSystem() = default;
 
     void update(GameWorld& world);
+};
+
+struct VisionIntent {
+    int unitId = -1;
+    std::vector<int> visibleEnemyIds;
+};
+
+struct TargetHint {
+    int unitId = -1;
+    int targetId = -1;
+};
+
+struct MoveIntent {
+    int unitId = -1;
+    Coord from{};
+    Coord to{};
+    bool hasMove = false;
+    bool commandMove = false;
+    bool setIdle = false;
+    IMovementBehavior::MovementState nextState;
+};
+
+struct AttackIntent {
+    int attackerId = -1;
+    int targetId = -1;
+    AttackableType targetType = AttackableType::UNIT;
+    float damage = 0.f;
+    int nextTargetId = -1;
+    AttackableType nextTargetType = AttackableType::UNIT;
+    float nextCooldown = 0.f;
+    bool didAttack = false;
+};
+
+struct ProduceIntent {
+    int baseId = -1;
+    Faction faction = Faction::A;
+    UnitType type = UnitType::Infantry;
+};
+
+struct IntentBuffer {
+    std::vector<VisionIntent> visionIntents;
+    std::vector<TargetHint> targetHints;
+    std::vector<MoveIntent> moveIntents;
+    std::vector<AttackIntent> attackIntents;
+    std::vector<ProduceIntent> produceIntents;
+
+    void clear() {
+        visionIntents.clear();
+        targetHints.clear();
+        moveIntents.clear();
+        attackIntents.clear();
+        produceIntents.clear();
+    }
 };
 
 class BaseSystem {
@@ -257,7 +334,7 @@ private:
     std::vector<int>       selectedUnitIds;
     ControlMode            controlMode = ControlMode::Idle;
     std::optional<PendingTarget> pendingTarget;
-    bool                   quitRequested = false;
+    std::atomic<bool>      quitRequested{false};
     int                    nextUnitId = 1;
     int                    nextBaseId = 1;
     bool                   awaitingProductionChoice = false;
@@ -265,12 +342,20 @@ private:
     std::string            productionInputBuffer;
 
     mutable std::shared_mutex worldMutex;
+    struct UiEvent {
+        std::optional<std::string> input;
+        std::optional<std::string> feedback;
+    };
+    std::mutex               uiEventMutex;
+    std::queue<UiEvent>      uiEvents;
     struct ForcedReveal {
         std::weak_ptr<IAttackable> target;
         float                      timeLeft;
     };
     std::vector<ForcedReveal> forcedVisibleForA;
     std::vector<ForcedReveal> forcedVisibleForB;
+    std::vector<VisionIntent> lastVisionIntents;
+    std::vector<TargetHint>   lastTargetHints;
 
     
     friend class TaskPool;
@@ -303,6 +388,9 @@ public:
     // 命令/选中/辅助接口
     void enqueueCommand(const std::string& line);
     void processCommands();
+    void drainUiEvents();
+    void enqueueUiEvent(std::optional<std::string> input,
+                        std::optional<std::string> feedback);
 
     std::shared_ptr<Unit> findUnit(int id) const;
     std::shared_ptr<Base> findBase(int id, Faction fac) const;
@@ -315,8 +403,8 @@ public:
     const std::string& getLastCommandInput() const { return lastCommandInput; }
     const std::string& getLastCommandFeedback() const { return lastCommandFeedback; }
 
-    bool shouldQuit() const { return quitRequested; }
-    void requestQuit() { quitRequested = true; }
+    bool shouldQuit() const { return quitRequested.load(std::memory_order_acquire); }
+    void requestQuit() { quitRequested.store(true, std::memory_order_release); }
     bool isRenderRunning() const { return renderRunning.load(); }
     bool isPaused() const { return paused.load(); }
     void pause();

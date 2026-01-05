@@ -6,6 +6,10 @@
 #include <iostream>
 #include <SFML/Graphics.hpp>
 #include <optional>
+#include <iterator>
+#include <cstdint>
+#include <map>
+#include <unordered_map>
 #include <unordered_set>
 #include <cmath>
 #include <cctype>
@@ -67,6 +71,245 @@ namespace {
         baseB = b;
         return true;
     }
+
+    int attackableId(const std::shared_ptr<IAttackable>& target) {
+        if (!target) return -1;
+        if (target->getAttackType() == AttackableType::BASE) {
+            auto basePtr = std::dynamic_pointer_cast<Base>(target);
+            return basePtr ? basePtr->getId() : -1;
+        }
+        auto unitPtr = std::dynamic_pointer_cast<Unit>(target);
+        return unitPtr ? unitPtr->getId() : -1;
+    }
+
+    struct AttackableKey {
+        int id = -1;
+        AttackableType type = AttackableType::UNIT;
+    };
+
+    AttackableKey attackableKey(const std::shared_ptr<IAttackable>& target) {
+        AttackableKey key;
+        if (!target) return key;
+        key.type = target->getAttackType();
+        if (key.type == AttackableType::BASE) {
+            auto basePtr = std::dynamic_pointer_cast<Base>(target);
+            key.id = basePtr ? basePtr->getId() : -1;
+        } else {
+            auto unitPtr = std::dynamic_pointer_cast<Unit>(target);
+            key.id = unitPtr ? unitPtr->getId() : -1;
+        }
+        return key;
+    }
+
+    std::vector<std::shared_ptr<IAttackable>> collectVisibleEnemies(
+        const Unit& unit,
+        const Map& map,
+        const std::vector<std::weak_ptr<IAttackable>>& enemies,
+        const std::vector<std::weak_ptr<IAttackable>>& forcedVisible)
+    {
+        std::vector<std::shared_ptr<IAttackable>> visible;
+        if (!map.inBounds(unit.getPos())) return visible;
+
+        const Tile& tile = map.getTile(unit.getPos());
+        float effVision = unit.baseStats.visionRange + tile.getVisionBonus();
+
+        for (const auto& w : enemies) {
+            auto e = w.lock();
+            if (!e || e->isDestroyed()) continue;
+            Coord p = e->getPos();
+            if (!map.inBounds(p)) continue;
+            float d = unit.getPos().mhtDistanceTo(p);
+            if (d <= effVision) {
+                visible.push_back(e);
+            }
+        }
+
+        for (const auto& w : forcedVisible) {
+            auto e = w.lock();
+            if (!e || e->isDestroyed()) continue;
+            if (std::find(visible.begin(), visible.end(), e) == visible.end()) {
+                visible.push_back(e);
+            }
+        }
+
+        return visible;
+    }
+
+    int pickTargetId(const Unit& unit,
+                     const std::vector<std::shared_ptr<IAttackable>>& visible) {
+        std::shared_ptr<IAttackable> bestBase;
+        float bestBaseDist = 1e9f;
+        std::shared_ptr<IAttackable> bestUnit;
+        float bestUnitDist = 1e9f;
+
+        for (const auto& e : visible) {
+            if (!e || e->isDestroyed()) continue;
+            float d = unit.getPos().mhtDistanceTo(e->getPos());
+            if (e->getAttackType() == AttackableType::BASE) {
+                if (d < bestBaseDist) {
+                    bestBaseDist = d;
+                    bestBase = e;
+                }
+            } else {
+                if (d < bestUnitDist) {
+                    bestUnitDist = d;
+                    bestUnit = e;
+                }
+            }
+        }
+
+        if (bestBase) return attackableId(bestBase);
+        return attackableId(bestUnit);
+    }
+
+    bool isVisibleTarget(const std::shared_ptr<IAttackable>& target,
+                         const std::vector<std::shared_ptr<IAttackable>>& visible) {
+        if (!target) return false;
+        for (const auto& v : visible) {
+            if (v == target) return true;
+        }
+        return false;
+    }
+
+    AttackIntent planAttackIntent(const Unit& unit,
+                                  const IAttackBehavior& attackBehavior,
+                                  UnitState state,
+                                  float dt,
+                                  const Map& map,
+                                  const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                                  const std::vector<std::weak_ptr<IAttackable>>& forcedVisible) {
+        AttackIntent intent;
+        intent.attackerId = unit.id;
+        const float cd = attackBehavior.getCooldown();
+        intent.nextCooldown = cd;
+
+        auto currentTarget = attackBehavior.getTarget().lock();
+        AttackableKey currentKey = attackableKey(currentTarget);
+        intent.nextTargetId = currentKey.id;
+        intent.nextTargetType = currentKey.type;
+
+        if (state != UnitState::Idle &&
+            state != UnitState::Attacking &&
+            state != UnitState::Wandering) {
+            return intent;
+        }
+
+        float cdAfter = cd;
+        if (cdAfter > 0.f) {
+            cdAfter -= dt;
+        }
+
+        std::vector<std::shared_ptr<IAttackable>> visible =
+            collectVisibleEnemies(unit, map, enemies, forcedVisible);
+
+        bool needNewTarget = false;
+        if (!currentTarget) {
+            needNewTarget = true;
+        } else if (currentTarget->isDestroyed()) {
+            needNewTarget = true;
+        } else if (!isVisibleTarget(currentTarget, visible)) {
+            needNewTarget = true;
+        }
+
+        if (needNewTarget) {
+            currentTarget = attackBehavior.findNearest(unit, map, visible);
+        }
+
+        if (!currentTarget) {
+            intent.nextCooldown = cdAfter;
+            intent.nextTargetId = -1;
+            return intent;
+        }
+
+        currentKey = attackableKey(currentTarget);
+        intent.nextTargetId = currentKey.id;
+        intent.nextTargetType = currentKey.type;
+
+        if (attackBehavior.inAttackRange(unit, map, currentTarget) && cdAfter <= 0.f) {
+            const Tile& tile = map.getTile(unit.getPos());
+            float dmg = unit.baseStats.attack + tile.getAttackBonus();
+            float cdBase = 0.8f;
+
+            if (tile.getType() == TileType::HILL) {
+                dmg *= 0.85f;
+                cdBase *= 1.25f;
+            }
+
+            intent.didAttack = true;
+            intent.targetId = intent.nextTargetId;
+            intent.targetType = intent.nextTargetType;
+            intent.damage = dmg;
+            intent.nextCooldown = cdBase;
+            return intent;
+        }
+
+        intent.nextCooldown = cdAfter;
+        return intent;
+    }
+
+    std::uint64_t packCoord(const Coord& c) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
+    }
+
+    float movementSpend(const Unit& unit, const Tile& tile) {
+        float s = unit.baseStats.moveSpeed / tile.getMoveCost();
+        if (unit.type == UnitType::Knight) {
+            switch (tile.getType()) {
+                case TileType::PLAIN:  return s * 1.1f;
+                case TileType::FOREST: return s * 0.6f;
+                case TileType::HILL:   return s * 0.7f;
+                case TileType::SWAMP:  return s * 0.4f;
+                default: return s;
+            }
+        }
+        return s;
+    }
+
+    MoveIntent planMoveIntent(const Unit& unit,
+                              const IMovementBehavior& movement,
+                              UnitState state,
+                              float dt,
+                              const Map& map,
+                              bool commandMove) {
+        MoveIntent intent;
+        intent.unitId = unit.id;
+        intent.from = unit.getPos();
+        intent.to = unit.getPos();
+        intent.commandMove = commandMove;
+
+        if (state != UnitState::Moving &&
+            state != UnitState::Chasing &&
+            state != UnitState::Wandering) {
+            return intent;
+        }
+
+        IMovementBehavior::MovementState nextState = movement.snapshot();
+        if (nextState.path.empty() || nextState.idx >= nextState.path.size()) {
+            intent.nextState = std::move(nextState);
+            intent.setIdle = true;
+            return intent;
+        }
+
+        Coord nextPos = unit.getPos();
+        float sp = movementSpend(unit, map.getTile(unit.getPos()));
+        nextState.accumulator += sp * dt;
+
+        while (nextState.accumulator >= 1.0f && nextState.idx + 1 < nextState.path.size()) {
+            nextState.accumulator -= 1.f;
+            nextPos = nextState.path[++nextState.idx];
+        }
+
+        if (nextState.idx + 1 >= nextState.path.size()) {
+            nextState.path.clear();
+        }
+
+        intent.to = nextPos;
+        intent.hasMove = (nextPos != intent.from);
+        intent.setIdle = nextState.path.empty();
+        intent.nextState = std::move(nextState);
+        return intent;
+    }
 } 
 
 GameWorld::GameWorld()
@@ -96,7 +339,7 @@ GameWorld::GameWorld()
     enemiesB.clear();
 
     
-    taskPool.init(this);
+    taskPool.init();
     renderSystem = std::make_unique<RenderSystem>();
 }
 
@@ -110,40 +353,451 @@ void GameWorld::update(float dt) {
     ++tick;
     // std::cout << "\n[World] Tick " << tick << "\n";
 
-    std::unique_lock<std::shared_mutex> lock(worldMutex);
     // std::cout << "  dt=" << dt << "\n";
 
-    processCommands();
-    if (paused.load() || gameEnded.load()) {
-        return;
+    drainUiEvents();
+    {
+        std::unique_lock<std::shared_mutex> lock(worldMutex);
+        processCommands();
+        if (paused.load() || gameEnded.load()) {
+            return;
+        }
+
+        decayForcedReveals(dt);
+        // std::cout << "  BaseSystem...\n";
+        baseSystem.update(*this, dt);
+        rebuildEnemies();
+
+        std::vector<std::shared_ptr<Unit>> allUnits;
+        allUnits.reserve(unitsA.size() + unitsB.size());
+        for (auto& u : unitsA) allUnits.push_back(u);
+        for (auto& u : unitsB) allUnits.push_back(u);
+        std::sort(allUnits.begin(), allUnits.end(),
+                  [](const std::shared_ptr<Unit>& a, const std::shared_ptr<Unit>& b) {
+                      return a->id < b->id;
+                  });
+        for (auto& u : allUnits) {
+            if (u && u->behavior) {
+                u->behavior->applyPendingCommand(*u, map);
+            }
+        }
     }
 
-    decayForcedReveals(dt);
-    // std::cout << "  BaseSystem...\n";
-    baseSystem.update(*this, dt);
-    rebuildEnemies();
+    const std::size_t localCount = std::max<std::size_t>(1, taskPool.workerCount());
 
-    // std::cout << "  VisionSystem...\n";
-    visionSystem.update(*this);
+    // Snapshot stage: read-only data for planning.
+    std::vector<std::shared_ptr<Unit>> unitsASnap;
+    std::vector<std::shared_ptr<Unit>> unitsBSnap;
+    std::vector<std::weak_ptr<IAttackable>> enemiesASnap;
+    std::vector<std::weak_ptr<IAttackable>> enemiesBSnap;
+    std::vector<ForcedReveal> forcedASnap;
+    std::vector<ForcedReveal> forcedBSnap;
+    {
+        std::shared_lock<std::shared_mutex> lock(worldMutex);
+        unitsASnap = unitsA;
+        unitsBSnap = unitsB;
+        enemiesASnap = enemiesA;
+        enemiesBSnap = enemiesB;
+        forcedASnap = forcedVisibleForA;
+        forcedBSnap = forcedVisibleForB;
+    }
 
-    // std::cout << "  MovementSystem...\n";
-    movementSystem.update(*this, dt);
+    std::vector<std::weak_ptr<IAttackable>> forcedA;
+    std::vector<std::weak_ptr<IAttackable>> forcedB;
+    forcedA.reserve(forcedASnap.size());
+    forcedB.reserve(forcedBSnap.size());
+    for (const auto& r : forcedASnap) {
+        if (!r.target.expired()) forcedA.push_back(r.target);
+    }
+    for (const auto& r : forcedBSnap) {
+        if (!r.target.expired()) forcedB.push_back(r.target);
+    }
 
-    // std::cout << "  AttackSystem...\n";
-    attackSystem.update(*this, dt);
+    // Plan stage (Vision): tasks read snapshots only; no world writes here.
+    auto visionGroup = std::make_shared<TaskGroup>();
+    std::vector<IntentBuffer> visionLocals(localCount);
 
-    // std::cout << "  CleanupSystem...\n";
-    cleanupSystem.update(*this);
+    auto scheduleVision = [&](const std::shared_ptr<Unit>& unit,
+                              const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                              const std::vector<std::weak_ptr<IAttackable>>& forced) {
+        if (!unit || !unit->isAlive()) return;
+        taskPool.submit([&, unit]() {
+            const int unitId = unit->id;
+            std::vector<std::shared_ptr<IAttackable>> visible =
+                collectVisibleEnemies(*unit, map, enemies, forced);
 
-    // 清理选中列表中已不存在的单位
-    std::unordered_set<int> alive;
-    for (auto& u : unitsA) if (u && u->isAlive()) alive.insert(u->id);
-    for (auto& u : unitsB) if (u && u->isAlive()) alive.insert(u->id);
-    selectedUnitIds.erase(
-        std::remove_if(selectedUnitIds.begin(), selectedUnitIds.end(),
-            [&](int id){ return alive.find(id) == alive.end(); }),
-        selectedUnitIds.end()
-    );
+            VisionIntent visionIntent;
+            visionIntent.unitId = unitId;
+            visionIntent.visibleEnemyIds.reserve(visible.size());
+            for (const auto& e : visible) {
+                int id = attackableId(e);
+                if (id >= 0) visionIntent.visibleEnemyIds.push_back(id);
+            }
+
+            TargetHint hint;
+            hint.unitId = unitId;
+            hint.targetId = pickTargetId(*unit, visible);
+
+            std::size_t idx = TaskPool::workerIndex();
+            if (idx == TaskPool::kInvalidWorkerIndex || idx >= visionLocals.size()) {
+                idx = 0;
+            }
+            IntentBuffer& buffer = visionLocals[idx];
+            buffer.visionIntents.push_back(std::move(visionIntent));
+            buffer.targetHints.push_back(hint);
+        }, visionGroup);
+    };
+
+    for (const auto& u : unitsASnap) {
+        scheduleVision(u, enemiesASnap, forcedA);
+    }
+    for (const auto& u : unitsBSnap) {
+        scheduleVision(u, enemiesBSnap, forcedB);
+    }
+    visionGroup->wait();
+
+    // Apply stage (Vision): main thread writes only, deterministic order.
+    {
+        std::unique_lock<std::shared_mutex> lock(worldMutex);
+        std::vector<VisionIntent> mergedVision;
+        std::vector<TargetHint> mergedHints;
+        for (auto& buffer : visionLocals) {
+            mergedVision.insert(mergedVision.end(),
+                                std::make_move_iterator(buffer.visionIntents.begin()),
+                                std::make_move_iterator(buffer.visionIntents.end()));
+            mergedHints.insert(mergedHints.end(),
+                               std::make_move_iterator(buffer.targetHints.begin()),
+                               std::make_move_iterator(buffer.targetHints.end()));
+        }
+
+        auto byUnitId = [](const auto& a, const auto& b) {
+            return a.unitId < b.unitId;
+        };
+        std::sort(mergedVision.begin(), mergedVision.end(), byUnitId);
+        std::sort(mergedHints.begin(), mergedHints.end(), byUnitId);
+        lastVisionIntents = std::move(mergedVision);
+        lastTargetHints = std::move(mergedHints);
+    }
+
+    // Snapshot stage for Movement planning (post-command).
+    std::vector<std::shared_ptr<Unit>> unitsASnapMove;
+    std::vector<std::shared_ptr<Unit>> unitsBSnapMove;
+    {
+        std::shared_lock<std::shared_mutex> lock(worldMutex);
+        unitsASnapMove = unitsA;
+        unitsBSnapMove = unitsB;
+    }
+
+    // Plan stage (Movement): tasks read snapshots only; no world writes here.
+    auto moveGroup = std::make_shared<TaskGroup>();
+    std::vector<IntentBuffer> moveLocals(localCount);
+
+    auto scheduleMove = [&](const std::shared_ptr<Unit>& unit) {
+        if (!unit || !unit->isAlive() || !unit->behavior) return;
+        taskPool.submit([&, unit]() {
+            const IMovementBehavior* movement = unit->behavior->getMovementBehavior();
+            if (!movement) return;
+            UnitState state = unit->behavior->getState();
+            if (state != UnitState::Moving &&
+                state != UnitState::Chasing &&
+                state != UnitState::Wandering) {
+                return;
+            }
+            bool commandMove = unit->behavior->isCommandMoveActive();
+            MoveIntent intent = planMoveIntent(*unit, *movement, state, dt, map, commandMove);
+
+            std::size_t idx = TaskPool::workerIndex();
+            if (idx == TaskPool::kInvalidWorkerIndex || idx >= moveLocals.size()) {
+                idx = 0;
+            }
+            moveLocals[idx].moveIntents.push_back(std::move(intent));
+        }, moveGroup);
+    };
+
+    for (const auto& u : unitsASnapMove) {
+        scheduleMove(u);
+    }
+    for (const auto& u : unitsBSnapMove) {
+        scheduleMove(u);
+    }
+    moveGroup->wait();
+
+    // Apply stage (Movement): main thread writes only, deterministic order.
+    {
+        std::unique_lock<std::shared_mutex> lock(worldMutex);
+        std::vector<MoveIntent> mergedMoves;
+        for (auto& buffer : moveLocals) {
+            mergedMoves.insert(mergedMoves.end(),
+                               std::make_move_iterator(buffer.moveIntents.begin()),
+                               std::make_move_iterator(buffer.moveIntents.end()));
+        }
+
+        std::sort(mergedMoves.begin(), mergedMoves.end(),
+                  [](const MoveIntent& a, const MoveIntent& b) {
+                      return a.unitId < b.unitId;
+                  });
+
+        std::vector<std::shared_ptr<Unit>> allUnits;
+        allUnits.reserve(unitsA.size() + unitsB.size());
+        for (auto& u : unitsA) allUnits.push_back(u);
+        for (auto& u : unitsB) allUnits.push_back(u);
+        std::sort(allUnits.begin(), allUnits.end(),
+                  [](const std::shared_ptr<Unit>& a, const std::shared_ptr<Unit>& b) {
+                      return a->id < b->id;
+                  });
+
+        std::unordered_map<int, std::shared_ptr<Unit>> unitById;
+        unitById.reserve(allUnits.size());
+        for (auto& u : allUnits) {
+            if (u) unitById[u->id] = u;
+        }
+
+        for (auto& intent : mergedMoves) {
+            auto it = unitById.find(intent.unitId);
+            if (it == unitById.end()) continue;
+            auto& unit = it->second;
+            if (!unit || !unit->behavior) continue;
+            IMovementBehavior* movement = unit->behavior->getMovementBehavior();
+            if (!movement) continue;
+            movement->applyState(std::move(intent.nextState));
+            if (intent.setIdle) {
+                unit->behavior->setState(UnitState::Idle);
+                unit->behavior->setCommandMoveActive(false);
+            }
+        }
+
+        struct CoordKey {
+            int x;
+            int y;
+        };
+        struct CoordLess {
+            bool operator()(const CoordKey& a, const CoordKey& b) const {
+                if (a.y != b.y) return a.y < b.y;
+                return a.x < b.x;
+            }
+        };
+
+        std::map<CoordKey, std::vector<MoveIntent*>, CoordLess> byTarget;
+        for (auto& intent : mergedMoves) {
+            if (!intent.hasMove) continue;
+            if (!map.inBounds(intent.to)) continue;
+            if (!map.getTile(intent.to).isPassable()) continue;
+            CoordKey key{intent.to.x, intent.to.y};
+            byTarget[key].push_back(&intent);
+        }
+
+        auto movePriority = [](const MoveIntent* a, const MoveIntent* b) {
+            if (a->commandMove != b->commandMove) return a->commandMove > b->commandMove;
+            return a->unitId < b->unitId;
+        };
+
+        std::vector<MoveIntent*> winners;
+        winners.reserve(byTarget.size());
+        for (auto& entry : byTarget) {
+            auto& candidates = entry.second;
+            std::sort(candidates.begin(), candidates.end(), movePriority);
+            winners.push_back(candidates.front());
+        }
+
+        std::sort(winners.begin(), winners.end(),
+                  [](const MoveIntent* a, const MoveIntent* b) {
+                      return a->unitId < b->unitId;
+                  });
+
+        std::unordered_set<std::uint64_t> occ;
+        occ.reserve(unitsA.size() + unitsB.size() + 4);
+        auto occupyIf = [&](bool ok, const Coord& c) {
+            if (ok) occ.insert(packCoord(c));
+        };
+        occupyIf(baseA && !baseA->isDestroyed(), baseA->getPos());
+        occupyIf(baseB && !baseB->isDestroyed(), baseB->getPos());
+        for (auto& u : unitsA) occupyIf(u && u->isAlive(), u->getPos());
+        for (auto& u : unitsB) occupyIf(u && u->isAlive(), u->getPos());
+
+        for (const auto* intent : winners) {
+            auto it = unitById.find(intent->unitId);
+            if (it == unitById.end()) continue;
+            auto& unit = it->second;
+            if (!unit || !unit->isAlive()) continue;
+            Coord from = unit->getPos();
+            Coord to = intent->to;
+            if (from == to) continue;
+            auto kPrev = packCoord(from);
+            auto kNow = packCoord(to);
+            occ.erase(kPrev);
+            if (occ.find(kNow) != occ.end()) {
+                occ.insert(kPrev);
+                continue;
+            }
+            unit->pos = to;
+            occ.insert(kNow);
+        }
+    }
+
+    // Snapshot stage for Attack planning (post-move/commands).
+    std::vector<std::shared_ptr<Unit>> unitsASnapAtk;
+    std::vector<std::shared_ptr<Unit>> unitsBSnapAtk;
+    std::vector<std::weak_ptr<IAttackable>> enemiesASnapAtk;
+    std::vector<std::weak_ptr<IAttackable>> enemiesBSnapAtk;
+    std::vector<ForcedReveal> forcedASnapAtk;
+    std::vector<ForcedReveal> forcedBSnapAtk;
+    {
+        std::shared_lock<std::shared_mutex> lock(worldMutex);
+        unitsASnapAtk = unitsA;
+        unitsBSnapAtk = unitsB;
+        enemiesASnapAtk = enemiesA;
+        enemiesBSnapAtk = enemiesB;
+        forcedASnapAtk = forcedVisibleForA;
+        forcedBSnapAtk = forcedVisibleForB;
+    }
+
+    std::vector<std::weak_ptr<IAttackable>> forcedAAtk;
+    std::vector<std::weak_ptr<IAttackable>> forcedBAtk;
+    forcedAAtk.reserve(forcedASnapAtk.size());
+    forcedBAtk.reserve(forcedBSnapAtk.size());
+    for (const auto& r : forcedASnapAtk) {
+        if (!r.target.expired()) forcedAAtk.push_back(r.target);
+    }
+    for (const auto& r : forcedBSnapAtk) {
+        if (!r.target.expired()) forcedBAtk.push_back(r.target);
+    }
+
+    // Plan stage (Attack): tasks read snapshots only; no world writes here.
+    auto attackGroup = std::make_shared<TaskGroup>();
+    std::vector<IntentBuffer> attackLocals(localCount);
+
+    auto scheduleAttack = [&](const std::shared_ptr<Unit>& unit,
+                              const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                              const std::vector<std::weak_ptr<IAttackable>>& forced) {
+        if (!unit || !unit->isAlive() || !unit->behavior) return;
+        taskPool.submit([&, unit]() {
+            const IAttackBehavior* attackBehavior = unit->behavior->getAttackBehavior();
+            if (!attackBehavior) return;
+            UnitState state = unit->behavior->getState();
+            AttackIntent intent = planAttackIntent(*unit, *attackBehavior, state, dt, map,
+                                                   enemies, forced);
+
+            std::size_t idx = TaskPool::workerIndex();
+            if (idx == TaskPool::kInvalidWorkerIndex || idx >= attackLocals.size()) {
+                idx = 0;
+            }
+            attackLocals[idx].attackIntents.push_back(std::move(intent));
+        }, attackGroup);
+    };
+
+    for (const auto& u : unitsASnapAtk) {
+        scheduleAttack(u, enemiesASnapAtk, forcedAAtk);
+    }
+    for (const auto& u : unitsBSnapAtk) {
+        scheduleAttack(u, enemiesBSnapAtk, forcedBAtk);
+    }
+    attackGroup->wait();
+
+    // Apply stage (Attack): main thread writes only, deterministic order.
+    {
+        std::unique_lock<std::shared_mutex> lock(worldMutex);
+        std::vector<std::shared_ptr<Unit>> allUnits;
+        allUnits.reserve(unitsA.size() + unitsB.size());
+        for (auto& u : unitsA) allUnits.push_back(u);
+        for (auto& u : unitsB) allUnits.push_back(u);
+        std::sort(allUnits.begin(), allUnits.end(),
+                  [](const std::shared_ptr<Unit>& a, const std::shared_ptr<Unit>& b) {
+                      return a->id < b->id;
+                  });
+
+        for (auto& u : allUnits) {
+            if (!u || !u->behavior) continue;
+            const auto& enemies = (u->getFaction() == Faction::A) ? enemiesA : enemiesB;
+            const auto& forced = (u->getFaction() == Faction::A) ? forcedAAtk : forcedBAtk;
+            u->behavior->updateVision(*u, map, enemies, forced);
+        }
+
+        std::vector<AttackIntent> mergedAttacks;
+        for (auto& buffer : attackLocals) {
+            mergedAttacks.insert(mergedAttacks.end(),
+                                 std::make_move_iterator(buffer.attackIntents.begin()),
+                                 std::make_move_iterator(buffer.attackIntents.end()));
+        }
+
+        std::sort(mergedAttacks.begin(), mergedAttacks.end(),
+                  [](const AttackIntent& a, const AttackIntent& b) {
+                      return a.attackerId < b.attackerId;
+                  });
+
+        auto resolveTarget = [&](int id, AttackableType type) -> std::shared_ptr<IAttackable> {
+            if (id < 0) return nullptr;
+            if (type == AttackableType::BASE) {
+                return findBase(id, Faction::A);
+            }
+            return findUnit(id);
+        };
+
+        std::map<std::pair<int, int>, float> damageByTarget;
+        std::vector<int> attackersToReveal;
+        attackersToReveal.reserve(mergedAttacks.size());
+
+        for (const auto& intent : mergedAttacks) {
+            auto attacker = findUnit(intent.attackerId);
+            if (!attacker || !attacker->behavior) continue;
+
+            IAttackBehavior* attackBehavior = attacker->behavior->getAttackBehavior();
+            if (!attackBehavior) continue;
+
+            attackBehavior->setCooldown(intent.nextCooldown);
+            if (intent.nextTargetId >= 0) {
+                auto target = resolveTarget(intent.nextTargetId, intent.nextTargetType);
+                attackBehavior->setTarget(std::weak_ptr<IAttackable>(target));
+            } else {
+                attackBehavior->setTarget(std::weak_ptr<IAttackable>{});
+            }
+
+            if (intent.didAttack && intent.targetId >= 0) {
+                auto key = std::make_pair(static_cast<int>(intent.targetType), intent.targetId);
+                damageByTarget[key] += intent.damage;
+                attackersToReveal.push_back(intent.attackerId);
+            }
+        }
+
+        for (const auto& entry : damageByTarget) {
+            AttackableType type = static_cast<AttackableType>(entry.first.first);
+            int targetId = entry.first.second;
+            auto target = resolveTarget(targetId, type);
+            if (target) {
+                target->takeDamage(entry.second);
+            }
+        }
+
+        std::sort(attackersToReveal.begin(), attackersToReveal.end());
+        attackersToReveal.erase(
+            std::unique(attackersToReveal.begin(), attackersToReveal.end()),
+            attackersToReveal.end()
+        );
+        for (int attackerId : attackersToReveal) {
+            auto attacker = findUnit(attackerId);
+            if (attacker) {
+                revealAttacker(*attacker);
+            }
+        }
+
+        for (auto& u : allUnits) {
+            if (!u || !u->behavior) continue;
+            const auto& enemies = (u->getFaction() == Faction::A) ? enemiesA : enemiesB;
+            u->behavior->postAttackStateUpdate(*u, map, enemies);
+        }
+
+        // std::cout << "  CleanupSystem...\n";
+        cleanupSystem.update(*this);
+
+        // 清理选中列表中已不存在的单位
+        std::unordered_set<int> alive;
+        for (auto& u : unitsA) if (u && u->isAlive()) alive.insert(u->id);
+        for (auto& u : unitsB) if (u && u->isAlive()) alive.insert(u->id);
+        selectedUnitIds.erase(
+            std::remove_if(selectedUnitIds.begin(), selectedUnitIds.end(),
+                [&](int id){ return alive.find(id) == alive.end(); }),
+            selectedUnitIds.end()
+        );
+    }
 }
 
 
@@ -224,10 +878,16 @@ void GameWorld::startRenderThread() {
             controlMode = ControlMode::Targeting;
             pause();
         };
+        auto postUiInput = [&](const std::string& input) {
+            enqueueUiEvent(std::optional<std::string>(input), std::nullopt);
+        };
+        auto postUi = [&](const std::string& input, const std::string& feedback) {
+            enqueueUiEvent(std::optional<std::string>(input),
+                           std::optional<std::string>(feedback));
+        };
         auto selectUnit = [&](const std::shared_ptr<Unit>& unit) {
             selectedUnitIds = {unit->id};
-            lastCommandInput = "click select";
-            lastCommandFeedback = "Selected #" + std::to_string(unit->id);
+            postUi("click select", "Selected #" + std::to_string(unit->id));
         };
         auto selectedFaction = [&]() -> std::optional<Faction> {
             if (selectedUnitIds.empty()) return std::nullopt;
@@ -264,16 +924,15 @@ void GameWorld::startRenderThread() {
                 auto u = findUnit(id);
                 if (u) u->issueMove(coord);
             }
-            lastCommandInput = "click move";
-            lastCommandFeedback = "Move to " + std::to_string(coord.x) + "," + std::to_string(coord.y);
+            postUi("click move",
+                   "Move to " + std::to_string(coord.x) + "," + std::to_string(coord.y));
         };
         auto issueAttack = [&](const std::shared_ptr<IAttackable>& target) {
             for (int id : selectedUnitIds) {
                 auto u = findUnit(id);
                 if (u) u->issueAttackTarget(target);
             }
-            lastCommandInput = "click attack";
-            lastCommandFeedback = "Attack target set";
+            postUi("click attack", "Attack target set");
         };
         auto shutdownStart = std::chrono::steady_clock::time_point{};
         bool shutdownArmed = false;
@@ -302,7 +961,7 @@ void GameWorld::startRenderThread() {
                         if (key->code == Key::P) {
                             cancelProductionChoice();
                             resume();
-                            lastCommandInput = "production cancel (P)";
+                            postUiInput("production cancel (P)");
                             continue;
                         }
                         if (key->code == Key::Enter) {
@@ -364,7 +1023,7 @@ void GameWorld::startRenderThread() {
                         if (renderSystem->inputActive) {
                             if (!renderSystem->inputBuffer.empty()) {
                                 enqueueCommand(renderSystem->inputBuffer);
-                                lastCommandInput = renderSystem->inputBuffer;
+                                postUiInput(renderSystem->inputBuffer);
                             }
                             renderSystem->inputBuffer.clear();
                             renderSystem->inputActive = false;
@@ -391,8 +1050,7 @@ void GameWorld::startRenderThread() {
                         requestQuit();
                     } else if (key->code == Key::P) {
                         togglePause();
-                        lastCommandInput = "toggle pause";
-                        lastCommandFeedback = paused.load() ? "Paused" : "Resumed";
+                        postUi("toggle pause", paused.load() ? "Paused" : "Resumed");
                     }
                 }
 
@@ -422,8 +1080,7 @@ void GameWorld::startRenderThread() {
 
                     if (mouse->button == sf::Mouse::Button::Middle) {
                         togglePause();
-                        lastCommandInput = "mouse pause";
-                        lastCommandFeedback = paused.load() ? "Paused" : "Resumed";
+                        postUi("mouse pause", paused.load() ? "Paused" : "Resumed");
                         continue;
                     }
 
@@ -502,16 +1159,16 @@ void GameWorld::startRenderThread() {
                                 if (u) u->issueAttackTarget(target);
                             }
                             pause();
-                            lastCommandInput = "click attack";
-                            lastCommandFeedback = "Attack target set";
+                            postUi("click attack", "Attack target set");
                         } else {
                             for (int id : selectedUnitIds) {
                                 auto u = findUnit(id);
                                 if (u) u->issueMove(clicked);
                             }
                             pause();
-                            lastCommandInput = "click move";
-                            lastCommandFeedback = "Move to " + std::to_string(clicked.x) + "," + std::to_string(clicked.y);
+                            postUi("click move",
+                                   "Move to " + std::to_string(clicked.x) + "," +
+                                       std::to_string(clicked.y));
                         }
                     }
                 }
@@ -578,23 +1235,25 @@ void GameWorld::beginProductionChoice(const std::shared_ptr<Base>& base) {
     productionChoiceBase = base;
     productionInputBuffer.clear();
     pause();
-    lastCommandInput = "production choice";
-    lastCommandFeedback = "Enter unit code then press Enter; Esc to cancel";
+    enqueueUiEvent("production choice",
+                   "Enter unit code then press Enter; Esc to cancel");
 }
 
 bool GameWorld::handleProductionDigit(char digit) {
     if (!std::isdigit(static_cast<unsigned char>(digit))) return false;
     productionInputBuffer.push_back(digit);
-    lastCommandFeedback = "Production code: " + productionInputBuffer + " \n\t(Enter to confirm)";
+    enqueueUiEvent(std::nullopt,
+                   "Production code: " + productionInputBuffer + " \n\t(Enter to confirm)");
     return true;
 }
 
 bool GameWorld::handleProductionBackspace() {
     if (productionInputBuffer.empty()) return false;
     productionInputBuffer.pop_back();
-    lastCommandFeedback = productionInputBuffer.empty()
-        ? "Production code cleared"
-        : "Production code: " + productionInputBuffer;
+    enqueueUiEvent(std::nullopt,
+                   productionInputBuffer.empty()
+                       ? "Production code cleared"
+                       : "Production code: " + productionInputBuffer);
     return true;
 }
 
@@ -606,7 +1265,7 @@ bool GameWorld::commitProductionChoice() {
     }
 
     if (productionInputBuffer.empty()) {
-        lastCommandFeedback = "Please enter a numeric code";
+        enqueueUiEvent(std::nullopt, "Please enter a numeric code");
         return false;
     }
 
@@ -615,7 +1274,7 @@ bool GameWorld::commitProductionChoice() {
         productionChoiceBase.reset();
         productionInputBuffer.clear();
         resume();
-        lastCommandFeedback = msg;
+        enqueueUiEvent(std::nullopt, msg);
     };
 
     int code = -1;
@@ -633,9 +1292,10 @@ bool GameWorld::commitProductionChoice() {
     }
 
     basePtr->issueProduce(*type);
-    lastCommandFeedback = "Queued " +
-        std::string(*type == UnitType::Infantry ? "Infantry" :
-                    *type == UnitType::Archer   ? "Archer"   : "Knight");
+    enqueueUiEvent(std::nullopt,
+                   "Queued " +
+                       std::string(*type == UnitType::Infantry ? "Infantry" :
+                                   *type == UnitType::Archer   ? "Archer"   : "Knight"));
     awaitingProductionChoice = false;
     productionChoiceBase.reset();
     productionInputBuffer.clear();
@@ -647,7 +1307,7 @@ void GameWorld::cancelProductionChoice() {
     awaitingProductionChoice = false;
     productionChoiceBase.reset();
     productionInputBuffer.clear();
-    lastCommandFeedback = "Production canceled";
+    enqueueUiEvent(std::nullopt, "Production canceled");
     resume();
 }
 
@@ -690,6 +1350,35 @@ void GameWorld::processCommands() {
         } else {
             lastCommandFeedback = "ERR: " + r.message;
         }
+    }
+}
+
+void GameWorld::drainUiEvents() {
+    std::queue<UiEvent> local;
+    {
+        std::lock_guard<std::mutex> lock(uiEventMutex);
+        std::swap(local, uiEvents);
+    }
+    while (!local.empty()) {
+        const UiEvent& evt = local.front();
+        if (evt.input.has_value()) {
+            lastCommandInput = *evt.input;
+        }
+        if (evt.feedback.has_value()) {
+            lastCommandFeedback = *evt.feedback;
+        }
+        local.pop();
+    }
+}
+
+void GameWorld::enqueueUiEvent(std::optional<std::string> input,
+                               std::optional<std::string> feedback) {
+    UiEvent evt;
+    evt.input = std::move(input);
+    evt.feedback = std::move(feedback);
+    {
+        std::lock_guard<std::mutex> lock(uiEventMutex);
+        uiEvents.push(std::move(evt));
     }
 }
 

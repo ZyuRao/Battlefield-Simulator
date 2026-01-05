@@ -448,7 +448,7 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
     const bool hasBaseB = world.baseB && !world.baseB->isDestroyed();
 
     const float tileScale = layout.tileSize / 68.f;
-    const float overlayFactor = 0.80f;
+    const float overlayFactor = 1.5f;
     const float overlayScale = tileScale * overlayFactor;
     sf::Sprite tileSprite(tilesheetTexture);
     tileSprite.setScale({tileScale, tileScale});

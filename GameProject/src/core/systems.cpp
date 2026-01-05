@@ -3,6 +3,9 @@
 #include <string>
 #include <unordered_set>
 #include <cstdint>
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -43,6 +46,21 @@ namespace {
         return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
     }
+
+#ifndef NDEBUG
+    void debugAbort(const char* msg, const TaskGroup* group, int value) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "[TaskGroup] %s group=%p remaining=%d\n",
+                         msg,
+                         static_cast<const void*>(group),
+                         value);
+            std::fflush(stderr);
+        }
+        std::abort();
+    }
+#endif
 }
 
 TimeManager::TimeManager()
@@ -77,23 +95,76 @@ static std::size_t decideThreadCount(std::size_t requested) {
     return (hc == 0 ? 4 : hc);
 }
 
+TaskGroup::~TaskGroup() {
+#ifndef NDEBUG
+    alive.store(false, std::memory_order_release);
+    int remaining = count.load(std::memory_order_acquire);
+    if (remaining != 0) {
+        debugAbort("destroy with remaining tasks", this, remaining);
+    }
+#else
+    alive.store(false, std::memory_order_release);
+#endif
+}
 
-TaskPool::TaskPool() : stopping(false) {}
+void TaskGroup::add(int n) {
+#ifndef NDEBUG
+    if (!alive.load(std::memory_order_acquire)) {
+        debugAbort("add on dead group", this, count.load(std::memory_order_relaxed));
+    }
+#endif
+    if (n <= 0) return;
+    count.fetch_add(n, std::memory_order_relaxed);
+}
 
-void TaskPool::init(GameWorld* world) {
-    worldPtr = world;
+void TaskGroup::done() {
+#ifndef NDEBUG
+    if (!alive.load(std::memory_order_acquire)) {
+        debugAbort("done on dead group", this, count.load(std::memory_order_relaxed));
+    }
+#endif
+    int prev = count.fetch_sub(1, std::memory_order_acq_rel);
+#ifndef NDEBUG
+    if (prev <= 0) {
+        debugAbort("done underflow", this, prev);
+    }
+#endif
+    if (prev == 1) {
+        std::lock_guard<std::mutex> lock(mutex);
+        cv.notify_all();
+    }
+}
 
-    std::size_t tc = decideThreadCount(workers.size());
-    for(std::size_t i = 0; i < tc; i++) {
-        workers.emplace_back(&TaskPool::workerLoop, this);
+void TaskGroup::wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait(lock, [&]() {
+        return count.load(std::memory_order_acquire) == 0;
+    });
+}
+
+thread_local std::size_t TaskPool::tlsWorkerIndex = TaskPool::kInvalidWorkerIndex;
+
+std::size_t TaskPool::workerIndex() {
+    return tlsWorkerIndex;
+}
+
+TaskPool::TaskPool() : stopping(false), requestedThreads(0) {}
+
+void TaskPool::init() {
+    bool expected = false;
+    if (!initialized.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (!workers.empty()) return;
+    std::size_t tc = decideThreadCount(requestedThreads);
+    workers.reserve(tc);
+    for (std::size_t i = 0; i < tc; i++) {
+        workers.emplace_back(&TaskPool::workerLoop, this, i);
     }
 }
 
 TaskPool::TaskPool(std::size_t threadCount)
-    : stopping(false)
-{
-    workers.reserve(decideThreadCount(threadCount));
-}
+    : stopping(false), requestedThreads(threadCount) {}
 
 TaskPool::~TaskPool() {
     shutdown();
@@ -116,16 +187,27 @@ void TaskPool::shutdown() {
     workers.clear();
 }
 
-void TaskPool::submit(Job job) {
+void TaskPool::submit(Job job, std::shared_ptr<TaskGroup> group) {
+    // Ensure group accounting happens on the submitting thread.
+    if (group) group->add(1);
     {
         std::lock_guard<std::mutex> lock(queueMutex);
-        jobs.push(std::move(job));
+        jobs.push([job = std::move(job), group = std::move(group)]() mutable {
+            job();
+#ifndef NDEBUG
+            if (group && !group->isAlive()) {
+                debugAbort("worker before done on dead group", group.get(), group->debugCount());
+            }
+#endif
+            if (group) group->done();
+        });
     }
 
     cv.notify_one();
 }
 
-void TaskPool::workerLoop() {
+void TaskPool::workerLoop(std::size_t workerIndex) {
+    tlsWorkerIndex = workerIndex;
     while(true) {
         Job job;
 
@@ -142,10 +224,7 @@ void TaskPool::workerLoop() {
             jobs.pop();
         }
 
-        {
-            std::shared_lock<std::shared_mutex> lock(worldPtr->worldMutex);
-            job(*worldPtr);
-        }
+        job();
     }
 }
 

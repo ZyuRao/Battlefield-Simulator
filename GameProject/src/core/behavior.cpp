@@ -140,6 +140,24 @@ void DefaultMovementBehavior::update(Unit& u, float dt, const Map& map) {
     }
 }
 
+IMovementBehavior::MovementState DefaultMovementBehavior::snapshot() const {
+    IMovementBehavior::MovementState state;
+    state.path = path;
+    state.idx = idx;
+    state.accumulator = accumulator;
+    state.lastTarget = lastTarget;
+    state.hasLast = hasLast;
+    return state;
+}
+
+void DefaultMovementBehavior::applyState(IMovementBehavior::MovementState state) {
+    path = std::move(state.path);
+    idx = state.idx;
+    accumulator = state.accumulator;
+    lastTarget = state.lastTarget;
+    hasLast = state.hasLast;
+}
+
 void DefaultVisionBehavior::updateVisible(Unit& self, const Map& map,
                                           const std::vector<std::weak_ptr<IAttackable>>& allEnemies,
                                           const std::vector<std::weak_ptr<IAttackable>>& forcedVisible)
@@ -294,6 +312,14 @@ bool UnitBehavior::isDead() const {
     return stateMachine->get() == UnitState::Dead;
 }
 
+UnitState UnitBehavior::getState() const {
+    return stateMachine->get();
+}
+
+void UnitBehavior::setState(UnitState state) {
+    stateMachine->set(state);
+}
+
 void UnitBehavior::onKilled(Unit& u) {
     stateMachine->set(UnitState::Dead);
 }
@@ -305,6 +331,39 @@ void UnitBehavior::tickVision(
     const std::vector<std::weak_ptr<IAttackable>>& forcedVisible
 ) {
     if(isDead()) return;
+    vision->updateVisible(u, map, enemies, forcedVisible);
+}
+
+void UnitBehavior::applyPendingCommand(Unit& u, const Map& map) {
+    if (isDead()) return;
+
+    switch (command->pendingType()) {
+        case UnitCommandType::MoveTo:
+            movement->setMoveTarget(command->pendingMoveTarget(), map, u);
+            stateMachine->set(UnitState::Moving);
+            commandMoveActive = true;
+            break;
+        case UnitCommandType::AttackUnit:
+            attack->setTarget(command->pendingAttackTarget());
+            stateMachine->set(UnitState::Attacking);
+            commandMoveActive = false;
+            break;
+        case UnitCommandType::Stop:
+            movement->usePath().clear();
+            stateMachine->set(UnitState::Idle);
+            commandMoveActive = false;
+            break;
+        default:
+            break;
+    }
+
+    command->clear();
+}
+
+void UnitBehavior::updateVision(Unit& u, const Map& map,
+                                const std::vector<std::weak_ptr<IAttackable>>& enemies,
+                                const std::vector<std::weak_ptr<IAttackable>>& forcedVisible) {
+    if (isDead()) return;
     vision->updateVisible(u, map, enemies, forcedVisible);
 }
 
@@ -414,6 +473,77 @@ void UnitBehavior::tickAttack(
 
             break;
         }     
+        default:
+            break;
+    }
+}
+
+void UnitBehavior::postAttackStateUpdate(
+    Unit& u, const Map& map,
+    const std::vector<std::weak_ptr<IAttackable>>& enemies
+) {
+    if (isDead()) return;
+
+    UnitState st = stateMachine->get();
+
+    switch (st) {
+        case UnitState::Idle: {
+            auto tWeak = attack->getTarget();
+            if (!tWeak.expired()) {
+                stateMachine->set(UnitState::Attacking);
+                commandMoveActive = false;
+                break;
+            }
+            Coord dst = pickRandomWanderTarget(u, map, enemies, rng);
+            movement->setMoveTarget(dst, map, u);
+            stateMachine->set(UnitState::Wandering);
+            commandMoveActive = false;
+            break;
+        }
+        case UnitState::Attacking: {
+            auto t = attack->getTarget().lock();
+            if (!t || t->isDestroyed()) {
+                stateMachine->set(UnitState::Idle);
+                commandMoveActive = false;
+                break;
+            }
+            if (!attack->inAttackRange(u, map, t)) {
+                stateMachine->set(UnitState::Chasing);
+                movement->setMoveTarget(t->getPos(), map, u);
+                commandMoveActive = false;
+            }
+            break;
+        }
+        case UnitState::Chasing: {
+            auto t = attack->getTarget().lock();
+            if (!t || t->isDestroyed()) {
+                stateMachine->set(UnitState::Idle);
+                commandMoveActive = false;
+                break;
+            }
+            Coord curTargetPos = t->getPos();
+            if (attack->inAttackRange(u, map, t)) {
+                stateMachine->set(UnitState::Attacking);
+                commandMoveActive = false;
+                break;
+            }
+            if (!movement->hasLastTarget() ||
+                movement->getLastTarget() != curTargetPos)
+            {
+                movement->setMoveTarget(curTargetPos, map, u);
+                movement->setLastTarget(curTargetPos);
+                commandMoveActive = false;
+            }
+            break;
+        }
+        case UnitState::Wandering: {
+            auto tWeak = attack->getTarget();
+            if (!tWeak.expired()) {
+                stateMachine->set(UnitState::Attacking);
+                commandMoveActive = false;
+            }
+            break;
+        }
         default:
             break;
     }

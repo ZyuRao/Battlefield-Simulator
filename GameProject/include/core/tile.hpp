@@ -55,6 +55,7 @@ public:
         switch(type) {
             case TileType::PLAIN:     return "plain";
             case TileType::FOREST:    return "forest";
+            case TileType::HILL:      return "hill";
             case TileType::SWAMP:     return "swamp";
             case TileType::RIVER:     return "river";
             case TileType::MOUNTAIN:  return "mountain";
@@ -83,7 +84,7 @@ private:
             return {false, 0.0f, 0, 0};   // 默认不可走（需要桥）
 
         case TileType::MOUNTAIN:
-            return {false, 0.0f, +2, +2};  // 可通行但代价最高，视野极佳
+            return {false, 0.0f, +2, +2};  // 不可通行，视野极佳
 
         }
         return {true, 1.0f, 0, 0};
