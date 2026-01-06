@@ -21,7 +21,6 @@ target_include_directories(GameProject
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# SFML 3（你在 WSL 里已经安装到 /usr/local 的情况）
 set(SFML_STATIC_LIBRARIES ON)
 find_package(SFML 3 REQUIRED COMPONENTS Graphics Window System Audio)
 
