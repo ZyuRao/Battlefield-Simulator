@@ -6,7 +6,9 @@
 
 class BaseBehavior;
 class UnitBehavior;
-class GameWorld;  
+class GameWorld;
+class BaseSystem;
+struct WorldDataContext;
 class Map;
 
 
@@ -76,7 +78,7 @@ public:
     float baseProductTime = 2.f;
 
     Base(const Coord& p, Faction f);
-    void update(float dt, GameWorld& world);
+    void update(float dt, WorldDataContext& data, const BaseSystem& baseSystem);
 
     void setId(int v) { id = v; }
     int getId() const { return id; }

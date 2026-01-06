@@ -16,7 +16,9 @@ class Map;
 class Unit;
 class Base;
 class GameWorld;
+class BaseSystem;
 enum class UnitType;
+struct WorldDataContext;
 
 /*====================================
     Enum: UnitState / CommandType
@@ -189,7 +191,7 @@ public:
     virtual void setCooldown(float value) = 0;
     virtual void update(Unit& u, float dt, const Map& map, 
                         const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
-                        GameWorld& world) = 0;
+                        WorldDataContext& data) = 0;
     virtual std::shared_ptr<IAttackable> findNearest(const Unit& self,
                              const Map& map,
                              const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies) const = 0;
@@ -218,7 +220,7 @@ public:
     void setTarget(const std::weak_ptr<IAttackable>& t) override;
     void update(Unit& u, float dt, const Map& map,
                 const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
-                GameWorld& world) override;
+                WorldDataContext& data) override;
 };
 
 /*====================================
@@ -292,7 +294,7 @@ public:
     void tickMovement(Unit& u, float dt, const Map& map);
     void tickAttack(Unit& u, float dt, const Map& map,
         const std::vector<std::weak_ptr<IAttackable>>& visibleEnemies,
-        GameWorld& world);
+        WorldDataContext& data);
     UnitState getState() const;
     void setState(UnitState state);
     void applyPendingCommand(Unit& u, const Map& map);
@@ -364,7 +366,7 @@ private:
     float cd = 0.f;
 public:
     void begin(UnitType t, Base& self);
-    bool update(Base& self, float dt, GameWorld& world);
+    bool update(Base& self, float dt, WorldDataContext& data);
     UnitType type() const;
 
 };
@@ -376,12 +378,15 @@ private:
     std::unique_ptr<BaseStateMachine> stateMachine;
     std::unique_ptr<PeriodicProductionBehavior> periodic;
 
-    void reqSpawn(Base& self, GameWorld& world, UnitType t);
+    void reqSpawn(Base& self, WorldDataContext& data,
+                  const BaseSystem& baseSystem,
+                  UnitType t);
 public:
     BaseBehavior();
     void issueProduce(UnitType t);
     bool isDead() const;
     void onKilled(Base& self);
 
-    void update(Base& self, float dt, GameWorld& world);
+    void update(Base& self, float dt, WorldDataContext& data,
+                const BaseSystem& baseSystem);
 };

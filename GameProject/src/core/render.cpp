@@ -231,9 +231,9 @@ static void moveCursor(int row, int col) {
     std::cout << "\x1b[" << row << ";" << col << "H";
 }
 
-void RenderSystem::renderAscii(const GameWorld& world) {
-    const int W = world.map.getWidth();
-    const int H = world.map.getHeight();
+void RenderSystem::renderAscii(const WorldDataContext& data) {
+    const int W = data.map.getWidth();
+    const int H = data.map.getHeight();
 
     
     std::vector<std::string> buffer(H, std::string(W, ' '));
@@ -241,24 +241,24 @@ void RenderSystem::renderAscii(const GameWorld& world) {
     // 1. 生成本帧 buffer
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
-            auto sym = world.map.getTile({x,y}).getSymbol();
+            auto sym = data.map.getTile({x,y}).getSymbol();
             buffer[y][x] = sym.empty() ? ' ' : sym[0];
         }
     }
 
-    if (world.baseA && !world.baseA->isDestroyed())
-        buffer[world.baseA->getPos().y][world.baseA->getPos().x] = 'A';
+    if (data.baseA && !data.baseA->isDestroyed())
+        buffer[data.baseA->getPos().y][data.baseA->getPos().x] = 'A';
 
-    if (world.baseB && !world.baseB->isDestroyed())
-        buffer[world.baseB->getPos().y][world.baseB->getPos().x] = 'B';
+    if (data.baseB && !data.baseB->isDestroyed())
+        buffer[data.baseB->getPos().y][data.baseB->getPos().x] = 'B';
 
-    for (auto& u : world.unitsA)
+    for (auto& u : data.unitsA)
         if (u->isAlive()) {
             auto p = u->getPos();
             buffer[p.y][p.x] = u->getSymbol()[0];
         }
 
-    for (auto& u : world.unitsB)
+    for (auto& u : data.unitsB)
         if (u->isAlive()) {
             auto p = u->getPos();
             buffer[p.y][p.x] = u->getSymbol()[0];
@@ -288,11 +288,11 @@ void RenderSystem::renderAscii(const GameWorld& world) {
 }
 
 RenderSystem::Layout RenderSystem::computeLayout(
-    const GameWorld& world,
+    const WorldDataContext& data,
     const sf::RenderWindow& window
 ) const {
-    const int W = world.map.getWidth();
-    const int H = world.map.getHeight();
+    const int W = data.map.getWidth();
+    const int H = data.map.getHeight();
 
     sf::Vector2u winSize = window.getSize();
 
@@ -437,15 +437,15 @@ void RenderSystem::drawUnitIcon(sf::RenderWindow& window,
     window.draw(text);
 }
 
-void RenderSystem::drawMapLayer(const GameWorld& world,
+void RenderSystem::drawMapLayer(const WorldDataContext& data,
                                 sf::RenderWindow& window,
                                 const Layout& layout)
 {
     if (!texturesLoaded) return;
-    const int W = world.map.getWidth();
-    const int H = world.map.getHeight();
-    const bool hasBaseA = world.baseA && !world.baseA->isDestroyed();
-    const bool hasBaseB = world.baseB && !world.baseB->isDestroyed();
+    const int W = data.map.getWidth();
+    const int H = data.map.getHeight();
+    const bool hasBaseA = data.baseA && !data.baseA->isDestroyed();
+    const bool hasBaseB = data.baseB && !data.baseB->isDestroyed();
 
     const float tileScale = layout.tileSize / 68.f;
     const float overlayFactor = 1.5f;
@@ -460,10 +460,10 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             Coord c{ x, y };
-            const auto& tile = world.map.getTile(c);
+            const auto& tile = data.map.getTile(c);
             const bool hasBase =
-                (hasBaseA && world.baseA->getPos() == c) ||
-                (hasBaseB && world.baseB->getPos() == c);
+                (hasBaseA && data.baseA->getPos() == c) ||
+                (hasBaseB && data.baseB->getPos() == c);
 
             TileType type = tile.getType();
             sf::IntRect rect = tileRectFor(type);
@@ -504,14 +504,15 @@ void RenderSystem::drawMapLayer(const GameWorld& world,
 }
 
 
-void RenderSystem::drawBaseLayer(const GameWorld& world,
+void RenderSystem::drawBaseLayer(const WorldDataContext& data,
+                                 const WorldControlContext& control,
                                  sf::RenderWindow& window,
                                  const Layout& layout)
 {
     if (!texturesLoaded) return;
     std::vector<const Base*> bases;
-    if (world.baseA && !world.baseA->isDestroyed()) bases.push_back(world.baseA.get());
-    if (world.baseB && !world.baseB->isDestroyed()) bases.push_back(world.baseB.get());
+    if (data.baseA && !data.baseA->isDestroyed()) bases.push_back(data.baseA.get());
+    if (data.baseB && !data.baseB->isDestroyed()) bases.push_back(data.baseB.get());
 
     std::sort(bases.begin(), bases.end(), [](const Base* a, const Base* b) {
         if (a->getPos().y != b->getPos().y) return a->getPos().y < b->getPos().y;
@@ -545,8 +546,8 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
         };
         drawHpBar(window, hpCenter, layout.tileSize * 0.9f,
                   base->hp, base->maxHp);
-        if (world.awaitingProductionChoice) {
-            auto selected = world.productionChoiceBase.lock();
+        if (control.awaitingProductionChoice) {
+            auto selected = control.productionChoiceBase.lock();
             if (selected && selected.get() == base) {
                 sf::RectangleShape box;
                 box.setSize({layout.tileSize, layout.tileSize});
@@ -560,17 +561,18 @@ void RenderSystem::drawBaseLayer(const GameWorld& world,
     }
 }
 
-void RenderSystem::drawUnitLayer(const GameWorld& world,
+void RenderSystem::drawUnitLayer(const WorldDataContext& data,
+                                 const WorldControlContext& control,
                                  sf::RenderWindow& window,
                                  const Layout& layout)
 {
     if (!texturesLoaded) return;
     std::vector<const Unit*> units;
-    units.reserve(world.unitsA.size() + world.unitsB.size());
-    for (const auto& uPtr : world.unitsA) {
+    units.reserve(data.unitsA.size() + data.unitsB.size());
+    for (const auto& uPtr : data.unitsA) {
         if (uPtr && uPtr->isAlive()) units.push_back(uPtr.get());
     }
-    for (const auto& uPtr : world.unitsB) {
+    for (const auto& uPtr : data.unitsB) {
         if (uPtr && uPtr->isAlive()) units.push_back(uPtr.get());
     }
 
@@ -611,9 +613,9 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
                   unit->hp, unit->baseStats.maxHP);
     }
 
-    if (world.controlMode == GameWorld::ControlMode::Targeting &&
-        world.pendingTarget.has_value()) {
-        Coord targetTile = world.pendingTarget->tile;
+    if (control.controlMode == ControlState::ControlMode::Targeting &&
+        control.pendingTarget.has_value()) {
+        Coord targetTile = control.pendingTarget->tile;
         sf::Vector2f topLeft = tileTopLeft(layout, targetTile);
         sf::RectangleShape box;
         box.setSize({layout.tileSize, layout.tileSize});
@@ -628,7 +630,9 @@ void RenderSystem::drawUnitLayer(const GameWorld& world,
 
 // ============ HUD ============
 
-void RenderSystem::drawHud(const GameWorld& world,
+void RenderSystem::drawHud(const WorldDataContext& data,
+                           const WorldControlContext& control,
+                           const WorldRuntimeContext& runtime,
                            sf::RenderWindow& window,
                            const Layout& layout)
 {
@@ -637,16 +641,16 @@ void RenderSystem::drawHud(const GameWorld& world,
 
     int aliveA = 0;
     int aliveB = 0;
-    for (const auto& u : world.unitsA) if (u->isAlive()) ++aliveA;
-    for (const auto& u : world.unitsB) if (u->isAlive()) ++aliveB;
+    for (const auto& u : data.unitsA) if (u->isAlive()) ++aliveA;
+    for (const auto& u : data.unitsB) if (u->isAlive()) ++aliveB;
 
-    float hpA  = (world.baseA && !world.baseA->isDestroyed())
-                 ? world.baseA->hp : 0.f;
-    float maxA = (world.baseA) ? world.baseA->maxHp : 1.f;
+    float hpA  = (data.baseA && !data.baseA->isDestroyed())
+                 ? data.baseA->hp : 0.f;
+    float maxA = (data.baseA) ? data.baseA->maxHp : 1.f;
 
-    float hpB  = (world.baseB && !world.baseB->isDestroyed())
-                 ? world.baseB->hp : 0.f;
-    float maxB = (world.baseB) ? world.baseB->maxHp : 1.f;
+    float hpB  = (data.baseB && !data.baseB->isDestroyed())
+                 ? data.baseB->hp : 0.f;
+    float maxB = (data.baseB) ? data.baseB->maxHp : 1.f;
 
     float x = layout.hudX;
     float y = 30.f;
@@ -659,13 +663,13 @@ void RenderSystem::drawHud(const GameWorld& world,
     window.draw(text);
     y += 30.f;
 
-    if (world.isPaused()) {
+    if (runtime.paused.load()) {
         text.setFillColor(sf::Color(230, 200, 120));
         text.setString("Status: Paused");
         text.setPosition(sf::Vector2f{ x, y });
         window.draw(text);
         y += 24.f;
-    } else if (world.awaitingProductionChoice) {
+    } else if (control.awaitingProductionChoice) {
         text.setFillColor(sf::Color(200, 180, 120));
         text.setString("Enter digits to choose production\n(1=Infantry, 2=Archer, 3=Knight),\n\tpress Enter to confirm");
         text.setPosition(sf::Vector2f{ x, y });
@@ -715,7 +719,7 @@ void RenderSystem::drawHud(const GameWorld& world,
     window.draw(text);
     y += 30.f;
 
-    const auto& selected = world.getSelection();
+    const auto& selected = control.selectedUnitIds;
     std::string selStr = "Selected: ";
     if (selected.empty()) selStr += "None";
     else {
@@ -730,7 +734,7 @@ void RenderSystem::drawHud(const GameWorld& world,
     window.draw(text);
 }
 
-void RenderSystem::drawCommandPanel(const GameWorld& world,
+void RenderSystem::drawCommandPanel(const WorldControlContext& control,
                                     sf::RenderWindow& window,
                                     const Layout& layout)
 {
@@ -755,8 +759,8 @@ void RenderSystem::drawCommandPanel(const GameWorld& world,
                                      inputBuffer + (inputActive ? "_" : ""),
                                      inputSize,
                                      contentWidth);
-    const auto lastLines = wrapText(hudFont, world.getLastCommandInput(), bodySize, contentWidth);
-    const auto statusLines = wrapText(hudFont, world.getLastCommandFeedback(), bodySize, contentWidth);
+    const auto lastLines = wrapText(hudFont, control.lastCommandInput, bodySize, contentWidth);
+    const auto statusLines = wrapText(hudFont, control.lastCommandFeedback, bodySize, contentWidth);
 
     const float titleLine = hudFont.getLineSpacing(titleSize);
     const float inputLine = hudFont.getLineSpacing(inputSize);
@@ -874,12 +878,12 @@ void RenderSystem::drawIntroOverlay(sf::RenderWindow& window) {
     window.draw(fade);
 }
 
-void RenderSystem::drawWinOverlay(const GameWorld& world,
+void RenderSystem::drawWinOverlay(const WorldDataContext& data,
                                   sf::RenderWindow& window,
                                   const Layout& /*layout*/)
 {
-    bool aDead = world.baseA && world.baseA->isDestroyed();
-    bool bDead = world.baseB && world.baseB->isDestroyed();
+    bool aDead = data.baseA && data.baseA->isDestroyed();
+    bool bDead = data.baseB && data.baseB->isDestroyed();
     if (!aDead && !bDead) return;
 
     std::string textStr = aDead ? "Faction B Wins" : "Faction A Wins";
@@ -906,11 +910,11 @@ void RenderSystem::drawWinOverlay(const GameWorld& world,
     window.draw(txt);
 }
 
-std::optional<Coord> RenderSystem::pixelToTile(const GameWorld& world,
+std::optional<Coord> RenderSystem::pixelToTile(const WorldDataContext& data,
                                                const sf::RenderWindow& window,
                                                const sf::Vector2i& pixel) const
 {
-    Layout layout = computeLayout(world, window);
+    Layout layout = computeLayout(data, window);
     float localX = static_cast<float>(pixel.x) - layout.offsetX;
     float localY = static_cast<float>(pixel.y) - layout.offsetY;
     if (localX < 0.f || localY < 0.f) return std::nullopt;
@@ -918,8 +922,8 @@ std::optional<Coord> RenderSystem::pixelToTile(const GameWorld& world,
     int gy = static_cast<int>(localY / layout.tileSize);
 
     if (gx < 0 || gy < 0 ||
-        gx >= world.map.getWidth() ||
-        gy >= world.map.getHeight()) {
+        gx >= data.map.getWidth() ||
+        gy >= data.map.getHeight()) {
         return std::nullopt;
     }
     return Coord{gx, gy};
@@ -927,16 +931,18 @@ std::optional<Coord> RenderSystem::pixelToTile(const GameWorld& world,
 
 // ============ 渲染总入口 ============
 
-void RenderSystem::renderSfml(const GameWorld& world,
+void RenderSystem::renderSfml(const WorldDataContext& data,
+                              const WorldControlContext& control,
+                              const WorldRuntimeContext& runtime,
                               sf::RenderWindow& window) 
 {
-    Layout layout = computeLayout(world, window);
+    Layout layout = computeLayout(data, window);
 
-    drawMapLayer(world, window, layout);
-    drawBaseLayer(world, window, layout);
-    drawUnitLayer(world, window, layout);
-    drawHud(world, window, layout);
-    drawCommandPanel(world, window, layout);
-    drawWinOverlay(world, window, layout);
+    drawMapLayer(data, window, layout);
+    drawBaseLayer(data, control, window, layout);
+    drawUnitLayer(data, control, window, layout);
+    drawHud(data, control, runtime, window, layout);
+    drawCommandPanel(control, window, layout);
+    drawWinOverlay(data, window, layout);
     drawIntroOverlay(window);
 }

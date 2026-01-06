@@ -233,31 +233,31 @@ BaseSystem::BaseSystem() {
     rng.seed(rd());
 }
 
-void BaseSystem::update(GameWorld& world, float dt) {
-    if (world.baseA && !world.baseA->isDestroyed()) {
-        world.baseA->update(dt, world);
+void BaseSystem::update(WorldDataContext& data, float dt) {
+    if (data.baseA && !data.baseA->isDestroyed()) {
+        data.baseA->update(dt, data, *this);
     }
 
-    if (world.baseB && !world.baseB->isDestroyed()) {
-        world.baseB->update(dt, world);
+    if (data.baseB && !data.baseB->isDestroyed()) {
+        data.baseB->update(dt, data, *this);
     }
 }
 
-void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) const{
-    Coord spawnPos = findSpawnPos(base, world);
+void BaseSystem::spawnUnit(UnitType t, Base& base, WorldDataContext& data) const{
+    Coord spawnPos = findSpawnPos(base, data);
     if(spawnPos.x < 0 || spawnPos.y < 0) return;
     Faction fac = base.getFaction();
 
     try {
         auto makeUnit = [&](std::vector<std::shared_ptr<Unit>>& bucket) {
             auto u = std::make_shared<Unit>(t, spawnPos, fac);
-            world.registerUnit(u);
+            data.registerUnit(u);
             bucket.emplace_back(std::move(u));
         };
         if (fac == Faction::A) {
-            makeUnit(world.unitsA);
+            makeUnit(data.unitsA);
         } else {
-            makeUnit(world.unitsB);
+            makeUnit(data.unitsB);
         }
     } catch (const std::exception& e) {
         // 极端情况下 new 失败也不要把程序崩了
@@ -266,24 +266,24 @@ void BaseSystem::spawnUnit(UnitType t, Base& base, GameWorld& world) const{
     }
 }
 
-Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) const {
+Coord BaseSystem::findSpawnPos(const Base& base, const WorldDataContext& data) const {
     Coord c = base.getPos();
 
     std::vector<Coord> cand;
     std::vector<Coord> nbrs;
     cand.reserve(9);
     cand.push_back(c);
-    world.map.getNeighbors8(world.map, c, nbrs);
+    data.map.getNeighbors8(data.map, c, nbrs);
     for(auto c : nbrs) {
         cand.push_back(c);
     }
     std::vector<Coord> valid;
     valid.reserve(cand.size());
     for(auto c : cand) {
-        if (!world.map.inBounds(c)) continue;
-        const Tile& t = world.map.getTile(c);
+        if (!data.map.inBounds(c)) continue;
+        const Tile& t = data.map.getTile(c);
         if (!t.isPassable()) continue;
-        if (!world.isTileFree(c)) continue;   // 不要踩到别的 unit/base
+        if (!data.isTileFree(c)) continue;   // 不要踩到别的 unit/base
         valid.push_back(c);
     }
     if(valid.empty()) return Coord{-1, -1};
@@ -292,23 +292,23 @@ Coord BaseSystem::findSpawnPos(const Base& base, const GameWorld& world) const {
     return valid[dist(rng)];
 }
 
-void MovementSystem::update(GameWorld& world, float dt)
+void MovementSystem::update(WorldDataContext& data, float dt)
 {
     const float maxMoveDt = 0.05f;
     if (dt > maxMoveDt) dt = maxMoveDt;
 
     std::unordered_set<std::uint64_t> occ;
-    occ.reserve(world.unitsA.size() + world.unitsB.size() + 4);
+    occ.reserve(data.unitsA.size() + data.unitsB.size() + 4);
 
     auto occupyIf = [&](bool ok, const Coord& c) {
         if (ok) occ.insert(packCoord(c));
     };
 
     // 先把基地、所有单位当前位置登记为“已占用”
-    occupyIf(world.baseA && !world.baseA->isDestroyed(), world.baseA->getPos());
-    occupyIf(world.baseB && !world.baseB->isDestroyed(), world.baseB->getPos());
-    for (auto& u : world.unitsA) occupyIf(u && u->isAlive(), u->getPos());
-    for (auto& u : world.unitsB) occupyIf(u && u->isAlive(), u->getPos());
+    occupyIf(data.baseA && !data.baseA->isDestroyed(), data.baseA->getPos());
+    occupyIf(data.baseB && !data.baseB->isDestroyed(), data.baseB->getPos());
+    for (auto& u : data.unitsA) occupyIf(u && u->isAlive(), u->getPos());
+    for (auto& u : data.unitsB) occupyIf(u && u->isAlive(), u->getPos());
 
     auto stepUnits = [&](std::vector<std::shared_ptr<Unit>>& units) {
         for (auto& u : units) {
@@ -316,7 +316,7 @@ void MovementSystem::update(GameWorld& world, float dt)
             Coord prev = u->getPos();
 
             // 让单位按自身逻辑尝试移动（dt 很小的话基本只会走 0/1 格）
-            u->behavior->tickMovement(*u, dt, world.map);
+            u->behavior->tickMovement(*u, dt, data.map);
 
             Coord now = u->getPos();
             if (now == prev) continue;
@@ -342,71 +342,71 @@ void MovementSystem::update(GameWorld& world, float dt)
     static bool flip = false;
     flip = !flip;
     if (!flip) {
-        stepUnits(world.unitsA);
-        stepUnits(world.unitsB);
+        stepUnits(data.unitsA);
+        stepUnits(data.unitsB);
     } else {
-        stepUnits(world.unitsB);
-        stepUnits(world.unitsA);
+        stepUnits(data.unitsB);
+        stepUnits(data.unitsA);
     }
 }
 
-void VisionSystem::update(GameWorld& world)
+void VisionSystem::update(WorldDataContext& data)
 {
     // A 阵营视野
    
-    for (auto& u : world.unitsA) {
+    for (auto& u : data.unitsA) {
         if (u->isAlive()) {
             std::vector<std::weak_ptr<IAttackable>> forced;
-            world.appendForcedReveals(Faction::A, forced);
-            u->behavior->tickVision(*u, world.map, world.enemiesA, forced);
+            data.appendForcedReveals(Faction::A, forced);
+            u->behavior->tickVision(*u, data.map, data.enemiesA, forced);
         }
     }
 
     // B 阵营视野
-    for (auto& u : world.unitsB) {
+    for (auto& u : data.unitsB) {
         if (u->isAlive()) {
             std::vector<std::weak_ptr<IAttackable>> forced;
-            world.appendForcedReveals(Faction::B, forced);
-            u->behavior->tickVision(*u, world.map, world.enemiesB, forced);
+            data.appendForcedReveals(Faction::B, forced);
+            u->behavior->tickVision(*u, data.map, data.enemiesB, forced);
         }
     }
 }
 
-void AttackSystem::update(GameWorld& world, float dt)
+void AttackSystem::update(WorldDataContext& data, float dt)
 {
     // A 攻击
-    for (auto& u : world.unitsA) {
+    for (auto& u : data.unitsA) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map, world.enemiesA, world);
+            u->behavior->tickAttack(*u, dt, data.map, data.enemiesA, data);
         }
     }
 
     // B 攻击
-    for (auto& u : world.unitsB) {
+    for (auto& u : data.unitsB) {
         if (u->isAlive()) {
-            u->behavior->tickAttack(*u, dt, world.map, world.enemiesB, world);
+            u->behavior->tickAttack(*u, dt, data.map, data.enemiesB, data);
         }
     }
 }
 
-void CleanupSystem::update(GameWorld& world)
+void CleanupSystem::update(WorldDataContext& data)
 {
     // 清理单位 A
-    world.unitsA.erase(
-        std::remove_if(world.unitsA.begin(), world.unitsA.end(),
+    data.unitsA.erase(
+        std::remove_if(data.unitsA.begin(), data.unitsA.end(),
             [](const std::shared_ptr<Unit>& u){
                 return u->isDestroyed();
             }),
-        world.unitsA.end()
+        data.unitsA.end()
     );
 
     // 清理单位 B
-    world.unitsB.erase(
-        std::remove_if(world.unitsB.begin(), world.unitsB.end(),
+    data.unitsB.erase(
+        std::remove_if(data.unitsB.begin(), data.unitsB.end(),
             [](const std::shared_ptr<Unit>& u){
                 return u->isDestroyed();
             }),
-        world.unitsB.end()
+        data.unitsB.end()
     );
 
      auto cleanWeakVec = [](std::vector<std::weak_ptr<IAttackable>>& v) {
@@ -417,6 +417,6 @@ void CleanupSystem::update(GameWorld& world)
         );
     };
 
-    cleanWeakVec(world.enemiesA);
-    cleanWeakVec(world.enemiesB);
+    cleanWeakVec(data.enemiesA);
+    cleanWeakVec(data.enemiesB);
 }

@@ -9,7 +9,9 @@
 #include "core/Iattackable.hpp"
 #include "utils/vec2.hpp"
 
-class GameWorld;
+struct WorldControlContext;
+struct WorldDataContext;
+struct WorldRuntimeContext;
 
 enum class CommandType {
     Produce,
@@ -59,4 +61,7 @@ struct CommandResult {
 };
 
 bool parseCommand(const std::string& line, Command& out, std::string& err);
-CommandResult executeCommand(const Command& cmd, GameWorld& world);
+CommandResult executeCommand(const Command& cmd,
+                             WorldDataContext& data,
+                             WorldControlContext& control,
+                             WorldRuntimeContext& runtime);

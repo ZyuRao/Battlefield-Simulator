@@ -15,7 +15,8 @@ private:
 public:
     Game() : running(false) {}
     ~Game() {
-        world.stopRenderThread();
+        WorldRuntimeContext runtimeCtx(world.runtime);
+        runtimeCtx.stop();
         if(inputRunning.load()) {
             inputRunning.store(false);
         }
@@ -29,9 +30,13 @@ public:
         std::cout << "[Main] GameProject started.\n";
         std::cout << "[Game] world created\n";
 
-        world.startRenderThread();
+        WorldDataContext dataCtx(world.state);
+        WorldRuntimeContext runtimeCtx(world.runtime);
+        WorldControlContext controlCtx(world.control);
+
+        runtimeCtx.start(dataCtx, controlCtx, world.systems);
         inputRunning.store(true);
-        inputThread = std::thread([this]() {
+        inputThread = std::thread([this, &controlCtx]() {
             std::string line;
             while (inputRunning.load()) {
                 if (!std::cin.rdbuf()->in_avail()) {
@@ -40,7 +45,7 @@ public:
                 }
                 if (!std::getline(std::cin, line)) break;
                 if (line.empty()) continue;
-                world.enqueueCommand(line);
+                controlCtx.enqueueCommand(line);
             }
         });
         
@@ -63,26 +68,26 @@ public:
                 accumulator -= fixedDt;
             }
 
-            if(world.shouldQuit()) {
+            if(runtimeCtx.shouldQuit()) {
                 running = false;
             }
-            if(world.baseA->isDestroyed() || world.baseB->isDestroyed()) {
+            if(dataCtx.baseA->isDestroyed() || dataCtx.baseB->isDestroyed()) {
                 running = false;
-                std::string winner = !world.baseA->isDestroyed() ? "A" : "B";
+                std::string winner = !dataCtx.baseA->isDestroyed() ? "A" : "B";
                 std::cout << "Winner:" << winner << std::endl;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        world.markGameOver();
+        runtimeCtx.markGameOver();
         inputRunning.store(false);
         if (inputThread.joinable()) {
             inputThread.join();
         }
-        if (world.isRenderRunning()) {
-            world.waitRenderThread();
+        if (runtimeCtx.isRenderRunning()) {
+            runtimeCtx.join();
         }
-        world.stopRenderThread();
+        runtimeCtx.stop();
     }
 };

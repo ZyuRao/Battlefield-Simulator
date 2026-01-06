@@ -186,13 +186,16 @@
      return false;
  }
 
- CommandResult executeCommand(const Command& cmd, GameWorld& world) {
+ CommandResult executeCommand(const Command& cmd,
+                              WorldDataContext& data,
+                              WorldControlContext& control,
+                              WorldRuntimeContext& runtime) {
      CommandResult res;
      res.ok = false;
 
      switch (cmd.type) {
      case CommandType::Produce: {
-         auto base = world.findBase(cmd.baseId, cmd.baseFaction);
+         auto base = data.findBase(cmd.baseId, cmd.baseFaction);
          if (!base) {
              res.message = "base not found";
              return res;
@@ -204,7 +207,7 @@
          return res;
      }
      case CommandType::Move: {
-         auto unit = world.findUnit(cmd.unitId);
+         auto unit = data.findUnit(cmd.unitId);
          if (!unit || !cmd.hasCoord) {
              res.message = "unit not found or coord missing";
              return res;
@@ -216,7 +219,7 @@
          return res;
      }
      case CommandType::Attack: {
-         auto unit = world.findUnit(cmd.unitId);
+         auto unit = data.findUnit(cmd.unitId);
          if (!unit) {
              res.message = "attacker not found";
              return res;
@@ -224,10 +227,10 @@
 
          std::shared_ptr<IAttackable> target;
          if (cmd.targetIsBase) {
-             auto b = world.findBase(-1, cmd.baseFaction);
+             auto b = data.findBase(-1, cmd.baseFaction);
              if (b) target = b;
          } else if (cmd.targetId >= 0) {
-             target = world.findAttackable(cmd.targetId);
+             target = data.findAttackable(cmd.targetId);
          }
 
          if (!target) {
@@ -242,7 +245,7 @@
          return res;
      }
      case CommandType::Stop: {
-         auto unit = world.findUnit(cmd.unitId);
+         auto unit = data.findUnit(cmd.unitId);
          if (!unit) {
              res.message = "unit not found";
              return res;
@@ -254,26 +257,26 @@
          return res;
      }
      case CommandType::Select: {
-         auto unit = world.findUnit(cmd.unitId);
+         auto unit = data.findUnit(cmd.unitId);
          if (!unit) {
              res.message = "unit not found";
              return res;
          }
-         world.setSelection({unit->id});
+         control.setSelection({unit->id});
          res.ok = true;
          res.normalized = "select";
          res.message = "selected unit " + std::to_string(unit->id);
          return res;
      }
      case CommandType::DeselectAll: {
-         world.clearSelection();
+         control.clearSelection();
          res.ok = true;
          res.normalized = "deselect";
          res.message = "selection cleared";
          return res;
      }
      case CommandType::Quit: {
-         world.requestQuit();
+         runtime.requestQuit();
          res.ok = true;
          res.normalized = "quit";
          res.message = "user quit";

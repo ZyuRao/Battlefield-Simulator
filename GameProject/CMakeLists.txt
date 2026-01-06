@@ -14,6 +14,15 @@ add_executable(GameProject
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
 )
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    target_compile_options(GameProject PRIVATE
+        $<$<CONFIG:Release>:/O2 /DNDEBUG>
+    )
+else()
+    target_compile_options(GameProject PRIVATE
+        $<$<CONFIG:Release>:-O3 -DNDEBUG -g0>
+    )
+endif()
 
 # 头文件路径（包括 FastNoiseLite）
 target_include_directories(GameProject
@@ -31,4 +40,3 @@ target_link_libraries(GameProject
         SFML::System
         SFML::Audio
 )
-

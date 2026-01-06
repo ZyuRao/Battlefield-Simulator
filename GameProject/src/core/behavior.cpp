@@ -233,8 +233,8 @@ const std::vector<std::shared_ptr<IAttackable>>& DefaultVisionBehavior::getVisib
 }
 
 void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
-        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
-        GameWorld& world) {
+                        const std::vector<std::shared_ptr<IAttackable>>& visibleEnemies,
+                        WorldDataContext& data) {
     if(cd > 0) cd -= dt;
 
     std::shared_ptr<IAttackable> cur = target.lock();
@@ -275,7 +275,7 @@ void DefaultAttackBehavior::update(Unit& u, float dt, const Map& map,
             }
 
             cur->takeDamage(dmg);
-            world.revealAttacker(u);
+            data.revealAttacker(u);
             cd = cdBase;
         }
     }
@@ -439,14 +439,6 @@ void UnitBehavior::applyPendingCommand(Unit& u, const Map& map) {
             movement->setMoveTarget(command->pendingMoveTarget(), map, u);
             locomotionState = LocomotionState::Pathing;
             moveReason = MoveReason::Command;
-            combatState = CombatState::None;
-            combatAction = CombatAction::None;
-            commitTimer = 0.f;
-            commitTargetId = -1;
-            commitTargetType = AttackableType::UNIT;
-            commandAttackActive = false;
-            commandAttackTargetId = -1;
-            commandAttackTargetType = AttackableType::UNIT;
             retreating = false;
             retreatTimer = 0.f;
             hasRetreatAnchor = false;
@@ -521,7 +513,7 @@ void UnitBehavior::tickMovement(Unit& u, float dt, const Map& map) {
 void UnitBehavior::tickAttack(
     Unit& u, float dt, const Map& map,
     const std::vector<std::weak_ptr<IAttackable>>& enemies,
-    GameWorld& world
+    WorldDataContext& data
 ) {
     if(isDead()) return;
 
@@ -545,7 +537,7 @@ void UnitBehavior::tickAttack(
     command->clear();
 
     std::vector<std::weak_ptr<IAttackable>> forcedVisible;
-    world.appendForcedReveals(u.owner, forcedVisible);
+    data.appendForcedReveals(u.owner, forcedVisible);
     vision->updateVisible(u, map, enemies, forcedVisible);
     const auto& visible = vision->getVisible();
 
@@ -553,7 +545,7 @@ void UnitBehavior::tickAttack(
 
     switch(st) {
         case UnitState::Idle: {
-            attack->update(u, dt, map, visible, world);
+            attack->update(u, dt, map, visible, data);
             auto tWeak = attack->getTarget();
             if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);
@@ -566,7 +558,7 @@ void UnitBehavior::tickAttack(
             break;
         }     
         case UnitState::Attacking: {
-            attack->update(u, dt, map, visible, world);
+            attack->update(u, dt, map, visible, data);
             auto t = attack->getTarget().lock();
             if(!t || t->isDestroyed()) {
                 stateMachine->set(UnitState::Idle);
@@ -602,7 +594,7 @@ void UnitBehavior::tickAttack(
             break;
         }  
         case UnitState::Wandering: {
-            attack->update(u, dt, map, visible, world);
+            attack->update(u, dt, map, visible, data);
             auto tWeak = attack->getTarget();
             if(!tWeak.expired()) {
                 stateMachine->set(UnitState::Attacking);
@@ -686,7 +678,7 @@ void BaseSpawnBehavior::begin(UnitType t, Base& self) {
     cd = self.baseProductTime;  // 从 Base 读取生产时间
 }
 
-bool BaseSpawnBehavior::update(Base& self, float dt, GameWorld& world) {
+bool BaseSpawnBehavior::update(Base& self, float dt, WorldDataContext& data) {
     cd -= dt;
     return cd <= 0.f;
 }
@@ -710,15 +702,18 @@ bool BaseBehavior::isDead() const {
     return stateMachine->get() == BaseState::Dead;
 }
 
-void BaseBehavior::reqSpawn(Base& self, GameWorld& world, UnitType t){
-    world.getBaseSystem().spawnUnit(t, self, world);
+void BaseBehavior::reqSpawn(Base& self, WorldDataContext& data,
+                            const BaseSystem& baseSystem,
+                            UnitType t){
+    baseSystem.spawnUnit(t, self, data);
 }
 
 void BaseBehavior::onKilled(Base& self) {
     stateMachine->set(BaseState::Dead);
 }
 
-void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
+void BaseBehavior::update(Base& self, float dt, WorldDataContext& data,
+                          const BaseSystem& baseSystem) {
     if(isDead()) return;
 
     BaseState st = stateMachine->get();
@@ -742,9 +737,9 @@ void BaseBehavior::update(Base& self, float dt, GameWorld& world) {
         }
 
         case BaseState::Producing: {
-            if(spawn->update(self, dt, world)) {
+            if(spawn->update(self, dt, data)) {
                 UnitType t = spawn->type();
-                reqSpawn(self, world, t);
+                reqSpawn(self, data, baseSystem, t);
                 stateMachine->set(BaseState::Idle);
             }
             break;
@@ -764,8 +759,8 @@ void Base::issueProduce(UnitType t) {
     if (behavior) behavior->issueProduce(t);
 }
 
-void Base::update(float dt, GameWorld& world){
-    behavior->update(*this, dt, world);
+void Base::update(float dt, WorldDataContext& data, const BaseSystem& baseSystem){
+    behavior->update(*this, dt, data, baseSystem);
 }
 
 void Base::takeDamage(float dmg) {

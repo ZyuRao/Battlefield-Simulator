@@ -13,7 +13,9 @@
 #include <optional>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <queue>
 #ifdef _WIN32
@@ -22,6 +24,12 @@
 #include <SFML/Graphics.hpp>
 #include "command.hpp"
 
+
+class GameWorld;
+struct WorldDataContext;
+struct WorldRuntimeContext;
+struct WorldControlContext;
+struct SystemsBundle;
 
 
 class TimeManager {
@@ -87,7 +95,7 @@ class MovementSystem {
 public:
     MovementSystem() = default;
 
-    void update(GameWorld& world, float dt);
+    void update(WorldDataContext& data, float dt);
 
 };
 
@@ -95,20 +103,20 @@ class VisionSystem {
 public:
     VisionSystem() = default;
 
-    void update(GameWorld& world);
+    void update(WorldDataContext& data);
 };
 class AttackSystem {
 public:
     AttackSystem() = default;
 
-    void update(GameWorld& world, float dt);
+    void update(WorldDataContext& data, float dt);
 };
 
 class CleanupSystem {
 public:
     CleanupSystem() = default;
 
-    void update(GameWorld& world);
+    void update(WorldDataContext& data);
 };
 
 struct VisionIntent {
@@ -146,6 +154,8 @@ struct MoveIntent {
     bool commandMove = false;
     bool setIdle = false;
     MoveReason reason = MoveReason::None;
+    std::array<Coord, 3> candidates{};
+    int candidateCount = 0;
     bool retreating = false;
     float retreatTimer = 0.f;
     Coord retreatAnchor{};
@@ -190,26 +200,238 @@ struct IntentBuffer {
     }
 };
 
+struct AiScoring {
+    struct UnitSnapshot {
+        int id = -1;
+        UnitType type = UnitType::Infantry;
+        Faction faction = Faction::A;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        UnitStats stats{};
+        float cooldown = 0.f;
+        AttackableKey currentTarget{};
+        float commitTimer = 0.f;
+        AttackableKey commitTarget{};
+        bool commandAttackActive = false;
+        AttackableKey commandTarget{};
+        bool retreating = false;
+        float retreatTimer = 0.f;
+        Coord retreatAnchor{};
+        bool hasRetreatAnchor = false;
+        float timeSinceDamaged = 0.f;
+        float timeSinceDealtDamage = 0.f;
+        bool commandMoveActive = false;
+        LocomotionState locomotionState = LocomotionState::Idle;
+        CombatState combatState = CombatState::None;
+        MoveReason moveReason = MoveReason::None;
+        IMovementBehavior::MovementState movementState;
+    };
+
+    struct AttackableSnapshot {
+        AttackableKey key{};
+        AttackableType type = AttackableType::UNIT;
+        Faction faction = Faction::A;
+        UnitType unitType = UnitType::Infantry;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        float attack = 0.f;
+        float attackRange = 0.f;
+        float armor = 0.f;
+        bool isBase = false;
+    };
+
+    struct TargetScoreParams {
+        float distanceWeight = 1.2f;
+        float threatWeight = 1.0f;
+        float ttkWeight = 1.4f;
+        float executeWeight = 0.9f;
+        float preferenceWeight = 1.2f;
+        float overkillWeight = 1.1f;
+        float lockWeight = 0.6f;
+        float baseWeight = 0.8f;
+        float baseThreatPenalty = 1.2f;
+        float baseFinishBonus = 0.7f;
+        float commitBonus = 0.8f;
+        float commitDuration = 0.6f;
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteRangeMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+        float siegeHoldTime = 0.8f;
+        float losPenalty = 1.2f;
+        float unreachablePenalty = 1.8f;
+        float availabilityWeight = 0.9f;
+        int availabilityCap = 8;
+    };
+
+    struct ActionParams {
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+    };
+
+    struct RetreatParams {
+        float hpEnter = 0.35f;
+        float hpExit = 0.55f;
+        float threatEnter = 32.f;
+        float threatExit = 22.f;
+        float retreatMinTime = 0.8f;
+        int maxRetreatDist = 12;
+        int sampleRadius = 6;
+        float retreatFireThreat = 24.f;
+    };
+
+    struct OocParams {
+        float delay = 2.0f;
+        float regenRate = 0.08f;
+        float threatThreshold = 12.f;
+    };
+
+    struct ReachableGrid {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> reachable;
+
+        bool isReachable(const Coord& c) const {
+            if (c.x < 0 || c.x >= width || c.y < 0 || c.y >= height) return false;
+            std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
+            return reachable[idx] != 0;
+        }
+    };
+
+    struct TargetChoice {
+        const AttackableSnapshot* target = nullptr;
+        float score = -1e30f;
+        float baseOpportunity = 0.f;
+    };
+
+    static const TargetScoreParams kTargetParams;
+    static const ActionParams kActionParams;
+    static const RetreatParams kRetreatParams;
+    static const OocParams kOocParams;
+    static constexpr float kThreatRadius = 6.0f;
+
+    static float unitPreference(UnitType self, UnitType target);
+    static float basePreference(UnitType self);
+    static float threatScore(const AttackableSnapshot& target);
+    static float distanceScore(float dist);
+    static float ttkScore(const UnitSnapshot& self, const AttackableSnapshot& target);
+    static bool containsKey(const std::vector<const AttackableSnapshot*>& visible,
+                            const AttackableKey& key);
+    static std::vector<const AttackableSnapshot*> collectVisibleEnemies(
+        const UnitSnapshot& unit,
+        const Map& map,
+        const std::vector<AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys);
+    static float computeLocalThreat(const UnitSnapshot& self,
+                                    const std::vector<const AttackableSnapshot*>& enemies,
+                                    float radius);
+    static int countNearbyAllies(const std::vector<UnitSnapshot>& allies,
+                                 const Coord& pos,
+                                 int radius);
+    static int countNearbyEnemies(const std::vector<const AttackableSnapshot*>& enemies,
+                                  const Coord& pos,
+                                  int radius);
+    static float baseOpportunityScore(const UnitSnapshot& self,
+                                      const AttackableSnapshot& base,
+                                      const std::vector<UnitSnapshot>& allies,
+                                      const std::vector<const AttackableSnapshot*>& enemies,
+                                      const TargetScoreParams& params,
+                                      float localThreat);
+    static ReachableGrid buildReachableGrid(const Map& map, const Coord& start);
+    static float firingPositionAvailability(const UnitSnapshot& self,
+                                            const AttackableSnapshot& target,
+                                            const Map& map,
+                                            const ReachableGrid& reachable,
+                                            const std::unordered_set<std::uint64_t>& occ,
+                                            int cap);
+    static TargetChoice chooseTarget(
+        const UnitSnapshot& self,
+        const std::vector<const AttackableSnapshot*>& visible,
+        const std::vector<UnitSnapshot>& allies,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const TargetScoreParams& params,
+        const Map& map,
+        const ReachableGrid& reachable,
+        const std::unordered_set<std::uint64_t>& occ);
+    static bool inAttackRange(const UnitSnapshot& self,
+                              const Map& map,
+                              const AttackableSnapshot& target);
+    static float computeAttackDamage(const UnitSnapshot& self, const Map& map);
+    static float computeAttackCooldown(const UnitSnapshot& self, const Map& map);
+    static CombatAction decideCombatAction(const UnitSnapshot& self,
+                                           const AttackableSnapshot* target,
+                                           float dist,
+                                           bool inRange,
+                                           float cdAfter,
+                                           float localThreat,
+                                           float baseOpportunity,
+                                           const ActionParams& params);
+    static AttackIntent planAttackIntent(
+        const UnitSnapshot& unit,
+        float dt,
+        const Map& map,
+        const std::vector<AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const std::vector<UnitSnapshot>& allies,
+        const std::unordered_set<std::uint64_t>& occ);
+    static float movementSpend(const UnitSnapshot& unit, const Tile& tile);
+    static Coord chooseSafeSpot(const UnitSnapshot& self,
+                                const Map& map,
+                                const std::vector<AttackableSnapshot>& enemies,
+                                int sampleRadius);
+    static void rebuildPathState(const UnitSnapshot& unit,
+                                 const Map& map,
+                                 const Coord& desiredTarget,
+                                 IMovementBehavior::MovementState& nextState);
+    static MoveIntent planMoveIntent(
+        const UnitSnapshot& unit,
+        float dt,
+        const Map& map,
+        const std::vector<AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const std::vector<UnitSnapshot>& allies,
+        bool baseAlive,
+        const Coord& basePos,
+        const std::unordered_set<std::uint64_t>& occ);
+};
+
 class BaseSystem {
 public:
     BaseSystem();
 
-    void update(GameWorld& world, float dt);
-    void spawnUnit(UnitType t, Base& base, GameWorld& world) const;
+    void update(WorldDataContext& data, float dt);
+    void spawnUnit(UnitType t, Base& base, WorldDataContext& data) const;
 
 private:
 
     mutable std::mt19937 rng;
-    Coord findSpawnPos(const Base& base, const GameWorld& world) const;
+    Coord findSpawnPos(const Base& base, const WorldDataContext& data) const;
 };
 
 class RenderSystem {
 public:
     RenderSystem();
 
-    void renderAscii(const GameWorld& world);
+    void renderAscii(const WorldDataContext& data);
     //for ASCII
-    void renderSfml(const GameWorld& world, sf::RenderWindow& window);
+    void renderSfml(const WorldDataContext& data,
+                    const WorldControlContext& control,
+                    const WorldRuntimeContext& runtime,
+                    sf::RenderWindow& window);
 
 private:
     std::vector<std::string> lastBuffer;
@@ -254,21 +476,23 @@ private:
     sf::Vector2f tileTopLeft(const Layout& layout, const Coord& c) const;
     sf::Vector2f tileCenter(const Layout& layout, const Coord& c) const;
 
-    Layout   computeLayout(const GameWorld& world,
+    Layout   computeLayout(const WorldDataContext& data,
                            const sf::RenderWindow& window) const;
     sf::Color tileColor(TileType t) const;
     sf::Color factionColor(Faction f) const;
     sf::Color unitTypeColor(UnitType t) const;
 
-    void drawMapLayer(const GameWorld& world,
+    void drawMapLayer(const WorldDataContext& data,
                       sf::RenderWindow& window,
                       const Layout& layout);
 
-    void drawBaseLayer(const GameWorld& world,
+    void drawBaseLayer(const WorldDataContext& data,
+                       const WorldControlContext& control,
                        sf::RenderWindow& window,
                        const Layout& layout);
 
-    void drawUnitLayer(const GameWorld& world,
+    void drawUnitLayer(const WorldDataContext& data,
+                       const WorldControlContext& control,
                        sf::RenderWindow& window,
                        const Layout& layout);
 
@@ -283,20 +507,22 @@ private:
                       UnitType type,
                       Faction faction);
 
-    void drawHud(const GameWorld& world,
+    void drawHud(const WorldDataContext& data,
+                 const WorldControlContext& control,
+                 const WorldRuntimeContext& runtime,
                  sf::RenderWindow& window,
                  const Layout& layout);
 
-    void drawCommandPanel(const GameWorld& world,
+    void drawCommandPanel(const WorldControlContext& control,
                           sf::RenderWindow& window,
                           const Layout& layout);
 
     void drawIntroOverlay(sf::RenderWindow& window);
-    void drawWinOverlay(const GameWorld& world,
+    void drawWinOverlay(const WorldDataContext& data,
                         sf::RenderWindow& window,
                         const Layout& layout);
 
-    std::optional<Coord> pixelToTile(const GameWorld& world,
+    std::optional<Coord> pixelToTile(const WorldDataContext& data,
                                      const sf::RenderWindow& window,
                                      const sf::Vector2i& pixel) const;
 
@@ -314,70 +540,23 @@ private:
     bool inputActive = false;
     std::string inputBuffer;
     friend class GameWorld;
+    friend struct WorldRuntimeContext;
 };
 
-class GameWorld {
-private:
+struct ForcedReveal {
+    std::weak_ptr<IAttackable> target;
+    float timeLeft = 0.f;
+};
+
+struct WorldState {
+    WorldState(int width, int height);
     Map map;
     std::shared_ptr<Base> baseA;
     std::shared_ptr<Base> baseB;
-
     std::vector<std::shared_ptr<Unit>> unitsA;
     std::vector<std::shared_ptr<Unit>> unitsB;
-
     std::vector<std::weak_ptr<IAttackable>> enemiesA;
     std::vector<std::weak_ptr<IAttackable>> enemiesB;
-     // --- 系统层 ---
-    MovementSystem movementSystem;
-    VisionSystem   visionSystem;
-    AttackSystem   attackSystem;
-    CleanupSystem  cleanupSystem;
-    BaseSystem     baseSystem;
-
-    // 统一时间与任务
-    TimeManager    timeManager;
-    TaskPool       taskPool;
-
-    // --- 渲染相关（暂时只做接口占位） ---
-    std::unique_ptr<RenderSystem> renderSystem;
-    std::thread                   renderThread;
-    std::atomic<bool>             renderRunning{false};
-    std::atomic<bool>             paused{false};
-    std::atomic<bool>             gameEnded{false};
-    std::atomic<long long>        gameEndTimestampMs{0};
-
-    // --- 命令和交互状态 ---
-    enum class ControlMode { Idle, Targeting };
-    struct PendingTarget {
-        enum class Kind { Tile, Unit };
-        Kind kind = Kind::Tile;
-        Coord tile{};
-        int unitId = -1;
-    };
-    CommandQueue           commandQueue;
-    std::string            lastCommandInput;
-    std::string            lastCommandFeedback;
-    std::vector<int>       selectedUnitIds;
-    ControlMode            controlMode = ControlMode::Idle;
-    std::optional<PendingTarget> pendingTarget;
-    std::atomic<bool>      quitRequested{false};
-    int                    nextUnitId = 1;
-    int                    nextBaseId = 1;
-    bool                   awaitingProductionChoice = false;
-    std::weak_ptr<Base>    productionChoiceBase;
-    std::string            productionInputBuffer;
-
-    mutable std::shared_mutex worldMutex;
-    struct UiEvent {
-        std::optional<std::string> input;
-        std::optional<std::string> feedback;
-    };
-    std::mutex               uiEventMutex;
-    std::queue<UiEvent>      uiEvents;
-    struct ForcedReveal {
-        std::weak_ptr<IAttackable> target;
-        float                      timeLeft;
-    };
     std::vector<ForcedReveal> forcedVisibleForA;
     std::vector<ForcedReveal> forcedVisibleForB;
     std::vector<VisionIntent> lastVisionIntents;
@@ -386,76 +565,202 @@ private:
     std::unordered_map<AttackableKey, float, AttackableKeyHash> lastIncomingDamageB;
     std::unordered_map<AttackableKey, int, AttackableKeyHash> lastLockedTargetsA;
     std::unordered_map<AttackableKey, int, AttackableKeyHash> lastLockedTargetsB;
+    int nextUnitId = 1;
+    int nextBaseId = 1;
+};
+
+struct WorldRuntime {
+    struct UiEvent {
+        std::optional<std::string> input;
+        std::optional<std::string> feedback;
+    };
+
+    TaskPool taskPool;
+    std::thread renderThread;
+    std::atomic<bool> renderRunning{false};
+    std::atomic<bool> paused{false};
+    std::atomic<bool> gameEnded{false};
+    std::atomic<long long> gameEndTimestampMs{0};
+    std::atomic<bool> quitRequested{false};
+    mutable std::shared_mutex worldMutex;
+    std::mutex uiEventMutex;
+    std::queue<UiEvent> uiEvents;
+
+    WorldRuntime();
+};
+
+struct ControlState {
+    enum class ControlMode { Idle, Targeting };
+    struct PendingTarget {
+        enum class Kind { Tile, Unit };
+        Kind kind = Kind::Tile;
+        Coord tile{};
+        int unitId = -1;
+    };
+
+    CommandQueue           commandQueue;
+    std::string            lastCommandInput;
+    std::string            lastCommandFeedback;
+    std::vector<int>       selectedUnitIds;
+    ControlMode            controlMode = ControlMode::Idle;
+    std::optional<PendingTarget> pendingTarget;
+    bool                   awaitingProductionChoice = false;
+    std::weak_ptr<Base>    productionChoiceBase;
+    std::string            productionInputBuffer;
+
+    void resetTargeting();
+    void enterTargeting();
+    void cancelTargeting();
+    void commitTargeting();
+};
+
+struct SystemsBundle {
+    MovementSystem movement;
+    VisionSystem vision;
+    AttackSystem attack;
+    CleanupSystem cleanup;
+    BaseSystem base;
+    std::unique_ptr<RenderSystem> render;
+};
+
+struct WorldDataContext {
+    Map& map;
+    std::shared_ptr<Base>& baseA;
+    std::shared_ptr<Base>& baseB;
+    std::vector<std::shared_ptr<Unit>>& unitsA;
+    std::vector<std::shared_ptr<Unit>>& unitsB;
+    std::vector<std::weak_ptr<IAttackable>>& enemiesA;
+    std::vector<std::weak_ptr<IAttackable>>& enemiesB;
+    std::vector<ForcedReveal>& forcedVisibleForA;
+    std::vector<ForcedReveal>& forcedVisibleForB;
+    std::vector<VisionIntent>& lastVisionIntents;
+    std::vector<TargetHint>&   lastTargetHints;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash>& lastIncomingDamageA;
+    std::unordered_map<AttackableKey, float, AttackableKeyHash>& lastIncomingDamageB;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash>& lastLockedTargetsA;
+    std::unordered_map<AttackableKey, int, AttackableKeyHash>& lastLockedTargetsB;
+    int& nextUnitId;
+    int& nextBaseId;
+
+    explicit WorldDataContext(WorldState& state);
+
+    bool isTileFree(const Coord& c) const;
+    void rebuildEnemies();
+    std::shared_ptr<Unit> findUnit(int id) const;
+    std::shared_ptr<Base> findBase(int id, Faction fac) const;
+    std::shared_ptr<IAttackable> findAttackable(int id) const;
+    int registerUnit(const std::shared_ptr<Unit>& u);
+    int registerBase(const std::shared_ptr<Base>& b);
+    void addForcedReveal(Faction viewer,
+                         const std::shared_ptr<IAttackable>& target,
+                         float durationSeconds);
+    void decayForcedReveals(float dt);
+    void appendForcedReveals(Faction viewer,
+                             std::vector<std::weak_ptr<IAttackable>>& out) const;
+    void revealAttacker(const Unit& u);
+};
+
+struct WorldRuntimeContext {
+    TaskPool& taskPool;
+    std::thread& renderThread;
+    std::atomic<bool>& renderRunning;
+    std::atomic<bool>& paused;
+    std::atomic<bool>& gameEnded;
+    std::atomic<long long>& gameEndTimestampMs;
+    std::atomic<bool>& quitRequested;
+    std::shared_mutex& worldMutex;
+    std::mutex& uiEventMutex;
+    std::queue<WorldRuntime::UiEvent>& uiEvents;
+
+    explicit WorldRuntimeContext(WorldRuntime& runtime);
+
+    bool shouldQuit() const;
+    void requestQuit();
+    bool isRenderRunning() const;
+    bool isPaused() const;
+    void pause();
+    void resume();
+    void togglePause();
+    void markGameOver();
+    bool hasGameEnded() const;
+    long long gameEndMs() const;
+
+    void enqueueUiEvent(std::optional<std::string> input,
+                        std::optional<std::string> feedback);
+    void drainUiEvents(WorldControlContext& control);
+
+    void start(WorldDataContext& data,
+               WorldControlContext& control,
+               SystemsBundle& systems);
+    void stop();
+    void join();
+};
+
+struct WorldControlContext {
+    CommandQueue& commandQueue;
+    std::string& lastCommandInput;
+    std::string& lastCommandFeedback;
+    std::vector<int>& selectedUnitIds;
+    ControlState::ControlMode& controlMode;
+    std::optional<ControlState::PendingTarget>& pendingTarget;
+    bool& awaitingProductionChoice;
+    std::weak_ptr<Base>& productionChoiceBase;
+    std::string& productionInputBuffer;
+
+    explicit WorldControlContext(ControlState& control);
+
+    void enqueueCommand(const std::string& line);
+    void processCommands(WorldDataContext& data, WorldRuntimeContext& runtime);
+    void setSelection(const std::vector<int>& ids);
+    void clearSelection();
+    std::optional<UnitType> unitTypeFromCode(int code) const;
+    void beginProductionChoice(const std::shared_ptr<Base>& base,
+                               WorldRuntimeContext& runtime);
+    bool handleProductionDigit(char digit, WorldRuntimeContext& runtime);
+    bool handleProductionBackspace(WorldRuntimeContext& runtime);
+    bool commitProductionChoice(WorldRuntimeContext& runtime);
+    void cancelProductionChoice(WorldRuntimeContext& runtime);
+
+    void resetTargeting();
+    void enterTargeting();
+    void cancelTargeting();
+    void commitTargeting();
+};
+
+class GameWorld {
+private:
+    WorldState state;
+    WorldRuntime runtime;
+    ControlState control;
+    SystemsBundle systems;
+    TimeManager    timeManager;
+
+    static void appendUnitSnapshot(
+        const std::shared_ptr<Unit>& u,
+        std::vector<AiScoring::UnitSnapshot>& out,
+        std::unordered_set<std::uint64_t>* occ);
+    static void buildUnitSnapshots(
+        const std::vector<std::shared_ptr<Unit>>& units,
+        std::vector<AiScoring::UnitSnapshot>& out,
+        std::unordered_set<std::uint64_t>* occ);
+    static void buildEnemySnapshots(
+        const std::vector<std::shared_ptr<Unit>>& units,
+        const std::shared_ptr<Base>& base,
+        std::vector<AiScoring::AttackableSnapshot>& out);
+    static void rebuildEnemyIndex(
+        const std::vector<AiScoring::AttackableSnapshot>& snaps,
+        std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& index);
+    static void buildForcedKeys(
+        const std::vector<ForcedReveal>& forced,
+        std::vector<AttackableKey>& out);
 
     
-    friend class TaskPool;
-    friend class MovementSystem;
-    friend class VisionSystem;
-    friend class AttackSystem;
-    friend class CleanupSystem;
-    friend class BaseSystem;
     friend class RenderSystem;
     friend class Game;
-    friend CommandResult executeCommand(const Command& cmd, GameWorld& world);
 
 public:
     GameWorld();
     ~GameWorld();
     
     void update(float dt);
-
-    void startRenderThread();
-    void stopRenderThread();
-    void waitRenderThread();
-
-
-    const BaseSystem& getBaseSystem() const { return baseSystem; }
-    
-    bool isTileFree(const Coord& c) const; 
-    
-    void rebuildEnemies();
-
-    // 命令/选中/辅助接口
-    void enqueueCommand(const std::string& line);
-    void processCommands();
-    void drainUiEvents();
-    void enqueueUiEvent(std::optional<std::string> input,
-                        std::optional<std::string> feedback);
-
-    std::shared_ptr<Unit> findUnit(int id) const;
-    std::shared_ptr<Base> findBase(int id, Faction fac) const;
-    std::shared_ptr<IAttackable> findAttackable(int id) const;
-
-    void setSelection(const std::vector<int>& ids);
-    void clearSelection();
-    const std::vector<int>& getSelection() const { return selectedUnitIds; }
-
-    const std::string& getLastCommandInput() const { return lastCommandInput; }
-    const std::string& getLastCommandFeedback() const { return lastCommandFeedback; }
-
-    bool shouldQuit() const { return quitRequested.load(std::memory_order_acquire); }
-    void requestQuit() { quitRequested.store(true, std::memory_order_release); }
-    bool isRenderRunning() const { return renderRunning.load(); }
-    bool isPaused() const { return paused.load(); }
-    void pause();
-    void resume();
-    void togglePause();
-    void markGameOver();
-    bool hasGameEnded() const { return gameEnded.load(); }
-    long long gameEndMs() const { return gameEndTimestampMs.load(); }
-    void addForcedReveal(Faction viewer, const std::shared_ptr<IAttackable>& target, float durationSeconds);
-    void decayForcedReveals(float dt);
-    void appendForcedReveals(Faction viewer, std::vector<std::weak_ptr<IAttackable>>& out) const;
-    void revealAttacker(const Unit& u);
-    void beginProductionChoice(const std::shared_ptr<Base>& base);
-    bool handleProductionDigit(char digit);
-    bool handleProductionBackspace();
-    bool commitProductionChoice();
-    void cancelProductionChoice();
-    std::optional<UnitType> unitTypeFromCode(int code) const;
-
-    int registerUnit(const std::shared_ptr<Unit>& u);
-    int registerBase(const std::shared_ptr<Base>& b);
-
-    
 };
