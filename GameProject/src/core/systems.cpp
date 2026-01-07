@@ -250,7 +250,7 @@ void BaseSystem::spawnUnit(UnitType t, Base& base, WorldDataContext& data) const
 
     try {
         auto makeUnit = [&](std::vector<std::shared_ptr<Unit>>& bucket) {
-            auto u = std::make_shared<Unit>(t, spawnPos, fac);
+            auto u = UnitFactory::create(t, spawnPos, fac);
             data.registerUnit(u);
             bucket.emplace_back(std::move(u));
         };

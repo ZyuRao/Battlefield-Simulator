@@ -30,6 +30,7 @@ struct WorldDataContext;
 struct WorldRuntimeContext;
 struct WorldControlContext;
 struct SystemsBundle;
+struct InputStateMachine;
 
 
 class TimeManager {
@@ -315,98 +316,6 @@ struct AiScoring {
     static const RetreatParams kRetreatParams;
     static const OocParams kOocParams;
     static constexpr float kThreatRadius = 6.0f;
-
-    static float unitPreference(UnitType self, UnitType target);
-    static float basePreference(UnitType self);
-    static float threatScore(const AttackableSnapshot& target);
-    static float distanceScore(float dist);
-    static float ttkScore(const UnitSnapshot& self, const AttackableSnapshot& target);
-    static bool containsKey(const std::vector<const AttackableSnapshot*>& visible,
-                            const AttackableKey& key);
-    static std::vector<const AttackableSnapshot*> collectVisibleEnemies(
-        const UnitSnapshot& unit,
-        const Map& map,
-        const std::vector<AttackableSnapshot>& enemies,
-        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-        const std::vector<AttackableKey>& forcedKeys);
-    static float computeLocalThreat(const UnitSnapshot& self,
-                                    const std::vector<const AttackableSnapshot*>& enemies,
-                                    float radius);
-    static int countNearbyAllies(const std::vector<UnitSnapshot>& allies,
-                                 const Coord& pos,
-                                 int radius);
-    static int countNearbyEnemies(const std::vector<const AttackableSnapshot*>& enemies,
-                                  const Coord& pos,
-                                  int radius);
-    static float baseOpportunityScore(const UnitSnapshot& self,
-                                      const AttackableSnapshot& base,
-                                      const std::vector<UnitSnapshot>& allies,
-                                      const std::vector<const AttackableSnapshot*>& enemies,
-                                      const TargetScoreParams& params,
-                                      float localThreat);
-    static ReachableGrid buildReachableGrid(const Map& map, const Coord& start);
-    static float firingPositionAvailability(const UnitSnapshot& self,
-                                            const AttackableSnapshot& target,
-                                            const Map& map,
-                                            const ReachableGrid& reachable,
-                                            const std::unordered_set<std::uint64_t>& occ,
-                                            int cap);
-    static TargetChoice chooseTarget(
-        const UnitSnapshot& self,
-        const std::vector<const AttackableSnapshot*>& visible,
-        const std::vector<UnitSnapshot>& allies,
-        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-        const TargetScoreParams& params,
-        const Map& map,
-        const ReachableGrid& reachable,
-        const std::unordered_set<std::uint64_t>& occ);
-    static bool inAttackRange(const UnitSnapshot& self,
-                              const Map& map,
-                              const AttackableSnapshot& target);
-    static float computeAttackDamage(const UnitSnapshot& self, const Map& map);
-    static float computeAttackCooldown(const UnitSnapshot& self, const Map& map);
-    static CombatAction decideCombatAction(const UnitSnapshot& self,
-                                           const AttackableSnapshot* target,
-                                           float dist,
-                                           bool inRange,
-                                           float cdAfter,
-                                           float localThreat,
-                                           float baseOpportunity,
-                                           const ActionParams& params);
-    static AttackIntent planAttackIntent(
-        const UnitSnapshot& unit,
-        float dt,
-        const Map& map,
-        const std::vector<AttackableSnapshot>& enemies,
-        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-        const std::vector<AttackableKey>& forcedKeys,
-        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-        const std::vector<UnitSnapshot>& allies,
-        const std::unordered_set<std::uint64_t>& occ);
-    static float movementSpend(const UnitSnapshot& unit, const Tile& tile);
-    static Coord chooseSafeSpot(const UnitSnapshot& self,
-                                const Map& map,
-                                const std::vector<AttackableSnapshot>& enemies,
-                                int sampleRadius);
-    static void rebuildPathState(const UnitSnapshot& unit,
-                                 const Map& map,
-                                 const Coord& desiredTarget,
-                                 IMovementBehavior::MovementState& nextState);
-    static MoveIntent planMoveIntent(
-        const UnitSnapshot& unit,
-        float dt,
-        const Map& map,
-        const std::vector<AttackableSnapshot>& enemies,
-        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-        const std::vector<AttackableKey>& forcedKeys,
-        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-        const std::vector<UnitSnapshot>& allies,
-        bool baseAlive,
-        const Coord& basePos,
-        const std::unordered_set<std::uint64_t>& occ);
 };
 
 class BaseSystem {
@@ -420,6 +329,12 @@ private:
 
     mutable std::mt19937 rng;
     Coord findSpawnPos(const Base& base, const WorldDataContext& data) const;
+};
+
+struct UnitFactory {
+    static std::shared_ptr<Unit> create(UnitType type,
+                                        const Coord& start,
+                                        Faction faction);
 };
 
 class RenderSystem {
@@ -541,11 +456,44 @@ private:
     std::string inputBuffer;
     friend class GameWorld;
     friend struct WorldRuntimeContext;
+    friend struct InputStateMachine;
 };
 
 struct ForcedReveal {
     std::weak_ptr<IAttackable> target;
     float timeLeft = 0.f;
+};
+
+enum class WorldEventType {
+    UnitDamaged,
+    UnitDied,
+    BaseDestroyed,
+    GameEnded,
+    CommandIssued,
+    UnitSelected
+};
+
+struct WorldEvent {
+    WorldEventType type = WorldEventType::UnitDamaged;
+    int unitId = -1;
+    AttackableType targetType = AttackableType::UNIT;
+    int targetId = -1;
+    float value = 0.f;
+    Faction faction = Faction::A;
+    Coord pos{};
+};
+
+struct WorldEventBus {
+    using Handler = std::function<void(const WorldEvent&,
+                                       WorldControlContext&,
+                                       WorldRuntimeContext&)>;
+    void subscribe(Handler handler);
+    void publish(const WorldEvent& event);
+    void drain(WorldControlContext& control, WorldRuntimeContext& runtime);
+
+private:
+    std::vector<WorldEvent> pending;
+    std::vector<Handler> handlers;
 };
 
 struct WorldState {
@@ -585,6 +533,7 @@ struct WorldRuntime {
     mutable std::shared_mutex worldMutex;
     std::mutex uiEventMutex;
     std::queue<UiEvent> uiEvents;
+    WorldEventBus eventBus;
 
     WorldRuntime();
 };
@@ -607,11 +556,6 @@ struct ControlState {
     bool                   awaitingProductionChoice = false;
     std::weak_ptr<Base>    productionChoiceBase;
     std::string            productionInputBuffer;
-
-    void resetTargeting();
-    void enterTargeting();
-    void cancelTargeting();
-    void commitTargeting();
 };
 
 struct SystemsBundle {
@@ -671,6 +615,7 @@ struct WorldRuntimeContext {
     std::shared_mutex& worldMutex;
     std::mutex& uiEventMutex;
     std::queue<WorldRuntime::UiEvent>& uiEvents;
+    WorldEventBus& eventBus;
 
     explicit WorldRuntimeContext(WorldRuntime& runtime);
 

@@ -1330,26 +1330,28 @@ namespace {
 WorldState::WorldState(int width, int height)
     : map(width, height) {}
 
+void WorldEventBus::subscribe(Handler handler) {
+    handlers.push_back(std::move(handler));
+}
+
+void WorldEventBus::publish(const WorldEvent& event) {
+    pending.push_back(event);
+}
+
+void WorldEventBus::drain(WorldControlContext& control, WorldRuntimeContext& runtime) {
+    if (pending.empty()) return;
+    std::vector<WorldEvent> events;
+    events.swap(pending);
+    if (handlers.empty()) return;
+    for (const auto& evt : events) {
+        for (auto& handler : handlers) {
+            handler(evt, control, runtime);
+        }
+    }
+}
+
 WorldRuntime::WorldRuntime()
     : taskPool(4) {}
-
-void ControlState::resetTargeting() {
-    pendingTarget.reset();
-    controlMode = ControlMode::Idle;
-}
-
-void ControlState::enterTargeting() {
-    pendingTarget.reset();
-    controlMode = ControlMode::Targeting;
-}
-
-void ControlState::cancelTargeting() {
-    resetTargeting();
-}
-
-void ControlState::commitTargeting() {
-    resetTargeting();
-}
 
 WorldDataContext::WorldDataContext(WorldState& state)
     : map(state.map),
@@ -1380,7 +1382,8 @@ WorldRuntimeContext::WorldRuntimeContext(WorldRuntime& runtime)
       quitRequested(runtime.quitRequested),
       worldMutex(runtime.worldMutex),
       uiEventMutex(runtime.uiEventMutex),
-      uiEvents(runtime.uiEvents) {}
+      uiEvents(runtime.uiEvents),
+      eventBus(runtime.eventBus) {}
 
 WorldControlContext::WorldControlContext(ControlState& control)
     : commandQueue(control.commandQueue),
@@ -1398,170 +1401,421 @@ const AiScoring::ActionParams AiScoring::kActionParams{};
 const AiScoring::RetreatParams AiScoring::kRetreatParams{};
 const AiScoring::OocParams AiScoring::kOocParams{};
 
-float AiScoring::unitPreference(UnitType self, UnitType target) {
-    return ::unitPreference(self, target);
+namespace {
+    void enqueueUi(WorldRuntimeContext& runtime,
+                   const std::string& input,
+                   const std::string& feedback) {
+        runtime.enqueueUiEvent(std::optional<std::string>(input),
+                               std::optional<std::string>(feedback));
+    }
+
+    void enqueueUiInput(WorldRuntimeContext& runtime,
+                        const std::string& input) {
+        runtime.enqueueUiEvent(std::optional<std::string>(input), std::nullopt);
+    }
+
+    void enqueueRuntimeUi(WorldRuntime& runtime,
+                          std::optional<std::string> input,
+                          std::optional<std::string> feedback) {
+        WorldRuntime::UiEvent evt;
+        evt.input = std::move(input);
+        evt.feedback = std::move(feedback);
+        {
+            std::lock_guard<std::mutex> lock(runtime.uiEventMutex);
+            runtime.uiEvents.push(std::move(evt));
+        }
+    }
+
+    struct InputCommand {
+        virtual ~InputCommand() = default;
+        virtual void execute(WorldDataContext& data,
+                             WorldControlContext& control,
+                             WorldRuntimeContext& runtime) = 0;
+    };
+
+    struct MoveCommand final : InputCommand {
+        Coord dest{};
+        explicit MoveCommand(const Coord& d) : dest(d) {}
+
+        void execute(WorldDataContext& data,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            for (int id : control.selectedUnitIds) {
+                auto u = data.findUnit(id);
+                if (u) u->issueMove(dest);
+            }
+            enqueueUi(runtime, "click move",
+                      "Move to " + std::to_string(dest.x) + "," + std::to_string(dest.y));
+        }
+    };
+
+    struct AttackCommand final : InputCommand {
+        std::shared_ptr<IAttackable> target;
+        explicit AttackCommand(std::shared_ptr<IAttackable> t) : target(std::move(t)) {}
+
+        void execute(WorldDataContext& data,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            if (!target) return;
+            for (int id : control.selectedUnitIds) {
+                auto u = data.findUnit(id);
+                if (u) u->issueAttackTarget(target);
+            }
+            enqueueUi(runtime, "click attack", "Attack target set");
+        }
+    };
+
+    struct CancelCommand final : InputCommand {
+        void execute(WorldDataContext&,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            control.cancelTargeting();
+            runtime.resume();
+        }
+    };
+
+    struct SelectCommand final : InputCommand {
+        int unitId = -1;
+        explicit SelectCommand(int id) : unitId(id) {}
+
+        void execute(WorldDataContext&,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            if (unitId < 0) return;
+            control.setSelection({unitId});
+            enqueueUi(runtime, "click select",
+                      "Selected #" + std::to_string(unitId));
+        }
+    };
 }
 
-float AiScoring::basePreference(UnitType self) {
-    return ::basePreference(self);
-}
+// State + Command anchor: UI state controls input routing; commands execute on commit.
+struct InputStateMachine {
+    enum class UiState { Idle, Targeting, Production };
 
-float AiScoring::threatScore(const AttackableSnapshot& target) {
-    return ::threatScore(target);
-}
+    WorldDataContext& data;
+    WorldControlContext& control;
+    WorldRuntimeContext& runtime;
+    RenderSystem& render;
+    sf::RenderWindow& window;
 
-float AiScoring::distanceScore(float dist) {
-    return ::distanceScore(dist);
-}
+    InputStateMachine(WorldDataContext& d,
+                      WorldControlContext& c,
+                      WorldRuntimeContext& r,
+                      RenderSystem& rs,
+                      sf::RenderWindow& w)
+        : data(d), control(c), runtime(r), render(rs), window(w) {}
 
-float AiScoring::ttkScore(const UnitSnapshot& self, const AttackableSnapshot& target) {
-    return ::ttkScore(self, target);
-}
+    void handleEvent(const sf::Event& event) {
+        if (event.is<sf::Event::Closed>()) {
+            window.close();
+            runtime.renderRunning.store(false);
+            runtime.requestQuit();
+            return;
+        }
+        if (auto key = event.getIf<sf::Event::KeyPressed>()) {
+            handleKeyPressed(*key);
+        }
+        if (auto text = event.getIf<sf::Event::TextEntered>()) {
+            handleTextEntered(*text);
+        }
+        if (auto mouse = event.getIf<sf::Event::MouseButtonPressed>()) {
+            handleMousePressed(*mouse);
+        }
+    }
 
-bool AiScoring::containsKey(const std::vector<const AttackableSnapshot*>& visible,
-                            const AttackableKey& key) {
-    return ::containsKey(visible, key);
-}
+private:
+    UiState state() const {
+        if (control.awaitingProductionChoice) return UiState::Production;
+        if (control.controlMode == ControlState::ControlMode::Targeting) {
+            return UiState::Targeting;
+        }
+        return UiState::Idle;
+    }
 
-std::vector<const AiScoring::AttackableSnapshot*> AiScoring::collectVisibleEnemies(
-    const UnitSnapshot& unit,
-    const Map& map,
-    const std::vector<AttackableSnapshot>& enemies,
-    const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-    const std::vector<AttackableKey>& forcedKeys) {
-    return ::collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
-}
+    void handleKeyPressed(const sf::Event::KeyPressed& key) {
+        using sf::Keyboard::Key;
+        if (state() == UiState::Production) {
+            if (key.code == Key::Backspace) {
+                control.handleProductionBackspace(runtime);
+                return;
+            }
+            if (key.code == Key::P) {
+                control.cancelProductionChoice(runtime);
+                enqueueUiInput(runtime, "production cancel (P)");
+                return;
+            }
+            if (key.code == Key::Enter) {
+                control.commitProductionChoice(runtime);
+                return;
+            }
+            if (key.code == Key::Escape) {
+                control.cancelProductionChoice(runtime);
+                return;
+            }
+        }
 
-float AiScoring::computeLocalThreat(const UnitSnapshot& self,
-                                    const std::vector<const AttackableSnapshot*>& enemies,
-                                    float radius) {
-    return ::computeLocalThreat(self, enemies, radius);
-}
+        if (state() == UiState::Targeting) {
+            if (key.code == Key::Enter) {
+                commitTargeting();
+                return;
+            }
+            if (key.code == Key::Escape) {
+                std::unique_ptr<InputCommand> cmd = std::make_unique<CancelCommand>();
+                std::unique_lock<std::shared_mutex> lock(runtime.worldMutex);
+                cmd->execute(data, control, runtime);
+                return;
+            }
+        }
 
-int AiScoring::countNearbyAllies(const std::vector<UnitSnapshot>& allies,
-                                 const Coord& pos,
-                                 int radius) {
-    return ::countNearbyAllies(allies, pos, radius);
-}
+        if (key.code == Key::Enter) {
+            if (render.inputActive) {
+                if (!render.inputBuffer.empty()) {
+                    control.enqueueCommand(render.inputBuffer);
+                    enqueueUiInput(runtime, render.inputBuffer);
+                }
+                render.inputBuffer.clear();
+                render.inputActive = false;
+            } else {
+                render.inputBuffer.clear();
+                render.inputActive = true;
+            }
+        } else if (key.code == Key::Backspace) {
+            if (render.inputActive && !render.inputBuffer.empty()) {
+                render.inputBuffer.pop_back();
+            }
+        } else if (key.code == Key::Escape) {
+            if (render.inputActive) {
+                render.inputBuffer.clear();
+                render.inputActive = false;
+            } else {
+                window.close();
+                runtime.renderRunning.store(false);
+                runtime.requestQuit();
+            }
+        } else if (key.code == Key::Q) {
+            window.close();
+            runtime.renderRunning.store(false);
+            runtime.requestQuit();
+        } else if (key.code == Key::P) {
+            runtime.togglePause();
+            enqueueUi(runtime, "toggle pause",
+                      runtime.paused.load() ? "Paused" : "Resumed");
+        }
+    }
 
-int AiScoring::countNearbyEnemies(const std::vector<const AttackableSnapshot*>& enemies,
-                                  const Coord& pos,
-                                  int radius) {
-    return ::countNearbyEnemies(enemies, pos, radius);
-}
+    void handleTextEntered(const sf::Event::TextEntered& text) {
+        if (state() == UiState::Production) {
+            char32_t uni = text.unicode;
+            if (uni >= U'0' && uni <= U'9') {
+                control.handleProductionDigit(static_cast<char>(uni), runtime);
+            }
+            return;
+        }
 
-float AiScoring::baseOpportunityScore(const UnitSnapshot& self,
-                                      const AttackableSnapshot& base,
-                                      const std::vector<UnitSnapshot>& allies,
-                                      const std::vector<const AttackableSnapshot*>& enemies,
-                                      const TargetScoreParams& params,
-                                      float localThreat) {
-    return ::baseOpportunityScore(self, base, allies, enemies, params, localThreat);
-}
+        if (render.inputActive) {
+            char32_t uni = text.unicode;
+            if (uni >= 32 && uni < 127) {
+                render.inputBuffer.push_back(static_cast<char>(uni));
+            }
+        }
+    }
 
-AiScoring::ReachableGrid AiScoring::buildReachableGrid(const Map& map, const Coord& start) {
-    return ::buildReachableGrid(map, start);
-}
+    void handleMousePressed(const sf::Event::MouseButtonPressed& mouse) {
+        if (state() == UiState::Production &&
+            mouse.button != sf::Mouse::Button::Middle) {
+            return;
+        }
 
-float AiScoring::firingPositionAvailability(const UnitSnapshot& self,
-                                            const AttackableSnapshot& target,
-                                            const Map& map,
-                                            const ReachableGrid& reachable,
-                                            const std::unordered_set<std::uint64_t>& occ,
-                                            int cap) {
-    return ::firingPositionAvailability(self, target, map, reachable, occ, cap);
-}
+        if (mouse.button == sf::Mouse::Button::Middle) {
+            runtime.togglePause();
+            enqueueUi(runtime, "mouse pause",
+                      runtime.paused.load() ? "Paused" : "Resumed");
+            return;
+        }
 
-AiScoring::TargetChoice AiScoring::chooseTarget(
-    const UnitSnapshot& self,
-    const std::vector<const AttackableSnapshot*>& visible,
-    const std::vector<UnitSnapshot>& allies,
-    const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-    const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-    const TargetScoreParams& params,
-    const Map& map,
-    const ReachableGrid& reachable,
-    const std::unordered_set<std::uint64_t>& occ) {
-    return ::chooseTarget(self, visible, allies, incomingDamage, lockedCounts,
-                          params, map, reachable, occ);
-}
+        auto coordOpt = render.pixelToTile(data, window, mouse.position);
+        if (!coordOpt) return;
+        Coord clicked = *coordOpt;
 
-bool AiScoring::inAttackRange(const UnitSnapshot& self,
-                              const Map& map,
-                              const AttackableSnapshot& target) {
-    return ::inAttackRange(self, map, target);
-}
+        if (mouse.button == sf::Mouse::Button::Left) {
+            handleLeftClick(clicked);
+        } else if (mouse.button == sf::Mouse::Button::Right) {
+            handleRightClick(clicked);
+        }
+    }
 
-float AiScoring::computeAttackDamage(const UnitSnapshot& self, const Map& map) {
-    return ::computeAttackDamage(self, map);
-}
+    void handleLeftClick(const Coord& clicked) {
+        std::unique_lock<std::shared_mutex> lock(runtime.worldMutex);
+        if (state() == UiState::Targeting) {
+            handleTargetingClick(clicked);
+            return;
+        }
 
-float AiScoring::computeAttackCooldown(const UnitSnapshot& self, const Map& map) {
-    return ::computeAttackCooldown(self, map);
-}
+        std::shared_ptr<Base> baseTarget;
+        if (data.baseA && !data.baseA->isDestroyed() && data.baseA->getPos() == clicked) {
+            baseTarget = data.baseA;
+        } else if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == clicked) {
+            baseTarget = data.baseB;
+        }
+        if (baseTarget) {
+            control.beginProductionChoice(baseTarget, runtime);
+            return;
+        }
 
-CombatAction AiScoring::decideCombatAction(const UnitSnapshot& self,
-                                           const AttackableSnapshot* target,
-                                           float dist,
-                                           bool inRange,
-                                           float cdAfter,
-                                           float localThreat,
-                                           float baseOpportunity,
-                                           const ActionParams& params) {
-    return ::decideCombatAction(self, target, dist, inRange, cdAfter,
-                                localThreat, baseOpportunity, params);
-}
+        std::shared_ptr<Unit> pick;
+        for (auto& u : data.unitsA) {
+            if (u && u->isAlive() && u->getPos() == clicked) {
+                pick = u;
+                break;
+            }
+        }
+        if (pick) {
+            std::unique_ptr<InputCommand> cmd = std::make_unique<SelectCommand>(pick->id);
+            cmd->execute(data, control, runtime);
+            enterTargeting();
+        }
+    }
 
-AttackIntent AiScoring::planAttackIntent(
-    const UnitSnapshot& unit,
-    float dt,
-    const Map& map,
-    const std::vector<AttackableSnapshot>& enemies,
-    const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-    const std::vector<AttackableKey>& forcedKeys,
-    const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-    const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-    const std::vector<UnitSnapshot>& allies,
-    const std::unordered_set<std::uint64_t>& occ) {
-    return ::planAttackIntent(unit, dt, map, enemies, enemyIndex, forcedKeys,
-                              incomingDamage, lockedCounts, allies, occ);
-}
+    void handleRightClick(const Coord& clicked) {
+        if (state() == UiState::Targeting) return;
 
-float AiScoring::movementSpend(const UnitSnapshot& unit, const Tile& tile) {
-    return ::movementSpend(unit, tile);
-}
+        std::unique_lock<std::shared_mutex> lock(runtime.worldMutex);
+        if (control.selectedUnitIds.empty()) return;
 
-Coord AiScoring::chooseSafeSpot(const UnitSnapshot& self,
-                                const Map& map,
-                                const std::vector<AttackableSnapshot>& enemies,
-                                int sampleRadius) {
-    return ::chooseSafeSpot(self, map, enemies, sampleRadius);
-}
+        std::shared_ptr<IAttackable> target;
+        if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == clicked) {
+            target = data.baseB;
+        }
+        if (!target) {
+            for (auto& u : data.unitsB) {
+                if (u && u->isAlive() && u->getPos() == clicked) {
+                    target = u;
+                    break;
+                }
+            }
+        }
 
-void AiScoring::rebuildPathState(const UnitSnapshot& unit,
-                                 const Map& map,
-                                 const Coord& desiredTarget,
-                                 IMovementBehavior::MovementState& nextState) {
-    ::rebuildPathState(unit, map, desiredTarget, nextState);
-}
+        std::unique_ptr<InputCommand> cmd;
+        if (target) {
+            cmd = std::make_unique<AttackCommand>(target);
+        } else {
+            cmd = std::make_unique<MoveCommand>(clicked);
+        }
+        if (cmd) {
+            cmd->execute(data, control, runtime);
+            runtime.pause();
+        }
+    }
 
-MoveIntent AiScoring::planMoveIntent(
-    const UnitSnapshot& unit,
-    float dt,
-    const Map& map,
-    const std::vector<AttackableSnapshot>& enemies,
-    const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-    const std::vector<AttackableKey>& forcedKeys,
-    const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-    const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-    const std::vector<UnitSnapshot>& allies,
-    bool baseAlive,
-    const Coord& basePos,
-    const std::unordered_set<std::uint64_t>& occ) {
-    return ::planMoveIntent(unit, dt, map, enemies, enemyIndex, forcedKeys,
-                            incomingDamage, lockedCounts, allies,
-                            baseAlive, basePos, occ);
-}
+    void handleTargetingClick(const Coord& clicked) {
+        auto hitUnit = findUnitAt(clicked);
+        auto selFactionOpt = selectedFaction();
+        if (hitUnit && selFactionOpt.has_value() &&
+            hitUnit->getFaction() == *selFactionOpt) {
+            std::unique_ptr<InputCommand> cmd = std::make_unique<SelectCommand>(hitUnit->id);
+            cmd->execute(data, control, runtime);
+            control.pendingTarget.reset();
+        } else if (hitUnit) {
+            control.pendingTarget = ControlState::PendingTarget{
+                ControlState::PendingTarget::Kind::Unit,
+                hitUnit->getPos(),
+                hitUnit->id
+            };
+        } else {
+            control.pendingTarget = ControlState::PendingTarget{
+                ControlState::PendingTarget::Kind::Tile,
+                clicked,
+                -1
+            };
+        }
+    }
+
+    void commitTargeting() {
+        std::unique_lock<std::shared_mutex> lock(runtime.worldMutex);
+        if (!control.pendingTarget || control.selectedUnitIds.empty()) {
+            return;
+        }
+        auto selFactionOpt = selectedFaction();
+        if (!selFactionOpt.has_value()) {
+            std::unique_ptr<InputCommand> cmd = std::make_unique<CancelCommand>();
+            cmd->execute(data, control, runtime);
+            return;
+        }
+        Faction selFaction = *selFactionOpt;
+        Faction enemyFaction =
+            (selFaction == Faction::A) ? Faction::B : Faction::A;
+
+        std::unique_ptr<InputCommand> cmd;
+        if (control.pendingTarget->kind == ControlState::PendingTarget::Kind::Unit) {
+            auto targetUnit = data.findUnit(control.pendingTarget->unitId);
+            if (targetUnit && targetUnit->isAlive()) {
+                if (targetUnit->getFaction() == enemyFaction) {
+                    cmd = std::make_unique<AttackCommand>(targetUnit);
+                } else {
+                    cmd = std::make_unique<MoveCommand>(targetUnit->getPos());
+                }
+            } else {
+                cmd = std::make_unique<MoveCommand>(control.pendingTarget->tile);
+            }
+        } else {
+            auto target = resolveEnemyAt(enemyFaction, control.pendingTarget->tile);
+            if (target) {
+                cmd = std::make_unique<AttackCommand>(target);
+            } else {
+                cmd = std::make_unique<MoveCommand>(control.pendingTarget->tile);
+            }
+        }
+
+        if (cmd) {
+            cmd->execute(data, control, runtime);
+        }
+        control.commitTargeting();
+        runtime.resume();
+    }
+
+    void enterTargeting() {
+        control.enterTargeting();
+        runtime.pause();
+    }
+
+    std::optional<Faction> selectedFaction() const {
+        if (control.selectedUnitIds.empty()) return std::nullopt;
+        auto u = data.findUnit(control.selectedUnitIds.front());
+        if (!u) return std::nullopt;
+        return u->getFaction();
+    }
+
+    std::shared_ptr<Unit> findUnitAt(const Coord& coord) const {
+        for (auto& u : data.unitsA) {
+            if (u && u->isAlive() && u->getPos() == coord) return u;
+        }
+        for (auto& u : data.unitsB) {
+            if (u && u->isAlive() && u->getPos() == coord) return u;
+        }
+        return nullptr;
+    }
+
+    std::shared_ptr<IAttackable> resolveEnemyAt(Faction enemyFaction,
+                                                const Coord& coord) const {
+        if (enemyFaction == Faction::A) {
+            if (data.baseA && !data.baseA->isDestroyed() && data.baseA->getPos() == coord) {
+                return data.baseA;
+            }
+            for (auto& u : data.unitsA) {
+                if (u && u->isAlive() && u->getPos() == coord) return u;
+            }
+            return nullptr;
+        }
+        if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == coord) {
+            return data.baseB;
+        }
+        for (auto& u : data.unitsB) {
+            if (u && u->isAlive() && u->getPos() == coord) return u;
+        }
+        return nullptr;
+    }
+};
 
 void WorldRuntimeContext::start(WorldDataContext& data,
                                 WorldControlContext& control,
@@ -1616,74 +1870,8 @@ void WorldRuntimeContext::start(WorldDataContext& data,
         window.setPosition(sf::Vector2i{60, 60});
         window.setFramerateLimit(60);
 
-        auto commitTargeting = [&]() {
-            control.commitTargeting();
-            resume();
-        };
-        auto cancelTargeting = [&]() {
-            control.cancelTargeting();
-            resume();
-        };
-        auto enterTargeting = [&]() {
-            control.enterTargeting();
-            pause();
-        };
-        auto postUiInput = [&](const std::string& input) {
-            enqueueUiEvent(std::optional<std::string>(input), std::nullopt);
-        };
-        auto postUi = [&](const std::string& input, const std::string& feedback) {
-            enqueueUiEvent(std::optional<std::string>(input),
-                           std::optional<std::string>(feedback));
-        };
-        auto selectUnit = [&](const std::shared_ptr<Unit>& unit) {
-            control.selectedUnitIds = {unit->id};
-            postUi("click select", "Selected #" + std::to_string(unit->id));
-        };
-        auto selectedFaction = [&]() -> std::optional<Faction> {
-            if (control.selectedUnitIds.empty()) return std::nullopt;
-            auto u = data.findUnit(control.selectedUnitIds.front());
-            if (!u) return std::nullopt;
-            return u->getFaction();
-        };
-        auto findUnitAt = [&](const Coord& coord) -> std::shared_ptr<Unit> {
-            for (auto& u : data.unitsA) {
-                if (u && u->isAlive() && u->getPos() == coord) return u;
-            }
-            for (auto& u : data.unitsB) {
-                if (u && u->isAlive() && u->getPos() == coord) return u;
-            }
-            return nullptr;
-        };
-        auto resolveEnemyAt = [&](Faction enemyFaction, const Coord& coord)
-            -> std::shared_ptr<IAttackable> {
-            if (enemyFaction == Faction::A) {
-                if (data.baseA && !data.baseA->isDestroyed() && data.baseA->getPos() == coord) return data.baseA;
-                for (auto& u : data.unitsA) {
-                    if (u && u->isAlive() && u->getPos() == coord) return u;
-                }
-                return nullptr;
-            }
-            if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == coord) return data.baseB;
-            for (auto& u : data.unitsB) {
-                if (u && u->isAlive() && u->getPos() == coord) return u;
-            }
-            return nullptr;
-        };
-        auto issueMoveTo = [&](const Coord& coord) {
-            for (int id : control.selectedUnitIds) {
-                auto u = data.findUnit(id);
-                if (u) u->issueMove(coord);
-            }
-            postUi("click move",
-                   "Move to " + std::to_string(coord.x) + "," + std::to_string(coord.y));
-        };
-        auto issueAttack = [&](const std::shared_ptr<IAttackable>& target) {
-            for (int id : control.selectedUnitIds) {
-                auto u = data.findUnit(id);
-                if (u) u->issueAttackTarget(target);
-            }
-            postUi("click attack", "Attack target set");
-        };
+        InputStateMachine input(data, control, *this, renderSystem, window);
+
         auto shutdownStart = std::chrono::steady_clock::time_point{};
         bool shutdownArmed = false;
         while (renderRunning.load()) {
@@ -1694,234 +1882,7 @@ void WorldRuntimeContext::start(WorldDataContext& data,
             }
 
             while (const std::optional event = window.pollEvent()) {
-                if (event->is<sf::Event::Closed>()) {
-                    window.close();
-                    renderRunning.store(false);
-                    requestQuit();
-                }
-
-                if (auto key = event->getIf<sf::Event::KeyPressed>()) {
-                    using sf::Keyboard::Key;
-
-                    if (control.awaitingProductionChoice) {
-                        if (key->code == Key::Backspace) {
-                            control.handleProductionBackspace(*this);
-                            continue;
-                        }
-                        if (key->code == Key::P) {
-                            control.cancelProductionChoice(*this);
-                            resume();
-                            postUiInput("production cancel (P)");
-                            continue;
-                        }
-                        if (key->code == Key::Enter) {
-                            control.commitProductionChoice(*this);
-                            continue;
-                        }
-                        if (key->code == Key::Escape) {
-                            control.cancelProductionChoice(*this);
-                            resume();
-                            continue;
-                        }
-                    }
-
-                    if (control.controlMode == ControlState::ControlMode::Targeting) {
-                        if (key->code == Key::Enter) {
-                            std::unique_lock<std::shared_mutex> lock(worldMutex);
-                            if (!control.pendingTarget || control.selectedUnitIds.empty()) {
-                                continue;
-                            }
-                            auto selFactionOpt = selectedFaction();
-                            if (!selFactionOpt.has_value()) {
-                                cancelTargeting();
-                                continue;
-                            }
-                            Faction selFaction = *selFactionOpt;
-                            Faction enemyFaction =
-                                (selFaction == Faction::A) ? Faction::B : Faction::A;
-
-                            if (control.pendingTarget->kind == ControlState::PendingTarget::Kind::Unit) {
-                                auto targetUnit = data.findUnit(control.pendingTarget->unitId);
-                                if (targetUnit && targetUnit->isAlive()) {
-                                    if (targetUnit->getFaction() == enemyFaction) {
-                                        issueAttack(targetUnit);
-                                    } else {
-                                        issueMoveTo(targetUnit->getPos());
-                                    }
-                                } else {
-                                    issueMoveTo(control.pendingTarget->tile);
-                                }
-                            } else {
-                                auto target = resolveEnemyAt(enemyFaction, control.pendingTarget->tile);
-                                if (target) {
-                                    issueAttack(target);
-                                } else {
-                                    issueMoveTo(control.pendingTarget->tile);
-                                }
-                            }
-                            commitTargeting();
-                            continue;
-                        }
-                        if (key->code == Key::Escape) {
-                            std::unique_lock<std::shared_mutex> lock(worldMutex);
-                            cancelTargeting();
-                            continue;
-                        }
-                    }
-
-                    if (key->code == Key::Enter) {
-                        if (renderSystem.inputActive) {
-                            if (!renderSystem.inputBuffer.empty()) {
-                                control.enqueueCommand(renderSystem.inputBuffer);
-                                postUiInput(renderSystem.inputBuffer);
-                            }
-                            renderSystem.inputBuffer.clear();
-                            renderSystem.inputActive = false;
-                        } else {
-                            renderSystem.inputBuffer.clear();
-                            renderSystem.inputActive = true;
-                        }
-                    } else if (key->code == Key::Backspace) {
-                        if (renderSystem.inputActive && !renderSystem.inputBuffer.empty()) {
-                            renderSystem.inputBuffer.pop_back();
-                        }
-                    } else if (key->code == Key::Escape) {
-                        if (renderSystem.inputActive) {
-                            renderSystem.inputBuffer.clear();
-                            renderSystem.inputActive = false;
-                        } else {
-                            window.close();
-                            renderRunning.store(false);
-                            requestQuit();
-                        }
-                    } else if (key->code == Key::Q) {
-                        window.close();
-                        renderRunning.store(false);
-                        requestQuit();
-                    } else if (key->code == Key::P) {
-                        togglePause();
-                        postUi("toggle pause", paused.load() ? "Paused" : "Resumed");
-                    }
-                }
-
-                if (renderSystem.inputActive && !control.awaitingProductionChoice) {
-                    if (const auto text = event->getIf<sf::Event::TextEntered>()) {
-                        char32_t uni = text->unicode;
-                        if (uni >= 32 && uni < 127) {
-                            renderSystem.inputBuffer.push_back(static_cast<char>(uni));
-                        }
-                    }
-                } else if (control.awaitingProductionChoice) {
-                    if (const auto text = event->getIf<sf::Event::TextEntered>()) {
-                        char32_t uni = text->unicode;
-                        if (uni >= U'0' && uni <= U'9') {
-                            control.handleProductionDigit(static_cast<char>(uni), *this);
-                        }
-                    }
-                }
-
-                if (const auto mouse = event->getIf<sf::Event::MouseButtonPressed>()) {
-                    if (control.awaitingProductionChoice && mouse->button != sf::Mouse::Button::Middle) {
-                        // 忽略其他鼠标操作，保持选择流程
-                        continue;
-                    }
-
-                    auto coordOpt = renderSystem.pixelToTile(data, window, mouse->position);
-
-                    if (mouse->button == sf::Mouse::Button::Middle) {
-                        togglePause();
-                        postUi("mouse pause", paused.load() ? "Paused" : "Resumed");
-                        continue;
-                    }
-
-                    if (!coordOpt) continue;
-                    Coord clicked = *coordOpt;
-
-                    if (mouse->button == sf::Mouse::Button::Left) {
-                        std::unique_lock<std::shared_mutex> lock(worldMutex);
-                        if (control.controlMode == ControlState::ControlMode::Targeting) {
-                            auto hitUnit = findUnitAt(clicked);
-                            auto selFactionOpt = selectedFaction();
-                            if (hitUnit && selFactionOpt.has_value() &&
-                                hitUnit->getFaction() == *selFactionOpt) {
-                                selectUnit(hitUnit);
-                                control.pendingTarget.reset();
-                            } else if (hitUnit) {
-                                control.pendingTarget = ControlState::PendingTarget{
-                                    ControlState::PendingTarget::Kind::Unit,
-                                    hitUnit->getPos(),
-                                    hitUnit->id
-                                };
-                            } else {
-                                control.pendingTarget = ControlState::PendingTarget{
-                                    ControlState::PendingTarget::Kind::Tile,
-                                    clicked,
-                                    -1
-                                };
-                            }
-                            continue;
-                        }
-                        std::shared_ptr<Base> baseTarget;
-                        if (data.baseA && !data.baseA->isDestroyed() && data.baseA->getPos() == clicked) {
-                            baseTarget = data.baseA;
-                        } else if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == clicked) {
-                            baseTarget = data.baseB;
-                        }
-                        if (baseTarget) {
-                            control.beginProductionChoice(baseTarget, *this);
-                            continue;
-                        }
-
-                        std::shared_ptr<Unit> pick;
-                        for (auto& u : data.unitsA) {
-                            if (u && u->isAlive() && u->getPos() == clicked) {
-                                pick = u;
-                                break;
-                            }
-                        }
-                        if (pick) {
-                            selectUnit(pick);
-                            enterTargeting();
-                        }
-                    } else if (mouse->button == sf::Mouse::Button::Right) {
-                        if (control.controlMode == ControlState::ControlMode::Targeting) {
-                            continue;
-                        }
-                        std::unique_lock<std::shared_mutex> lock(worldMutex);
-                        if (control.selectedUnitIds.empty()) continue;
-
-                        std::shared_ptr<IAttackable> target;
-                        if (data.baseB && !data.baseB->isDestroyed() && data.baseB->getPos() == clicked) {
-                            target = data.baseB;
-                        }
-                        if (!target) {
-                            for (auto& u : data.unitsB) {
-                                if (u && u->isAlive() && u->getPos() == clicked) {
-                                    target = u;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (target) {
-                            for (int id : control.selectedUnitIds) {
-                                auto u = data.findUnit(id);
-                                if (u) u->issueAttackTarget(target);
-                            }
-                            pause();
-                            postUi("click attack", "Attack target set");
-                        } else {
-                            for (int id : control.selectedUnitIds) {
-                                auto u = data.findUnit(id);
-                                if (u) u->issueMove(clicked);
-                            }
-                            pause();
-                            postUi("click move",
-                                   "Move to " + std::to_string(clicked.x) + "," +
-                                       std::to_string(clicked.y));
-                        }
-                    }
-                }
+                input.handleEvent(*event);
             }
 
             if (!shutdownArmed && gameEnded.load()) {
@@ -1999,6 +1960,21 @@ GameWorld::GameWorld()
     
     runtime.taskPool.init();
     systems.render = std::make_unique<RenderSystem>();
+    auto* runtimePtr = &runtime;
+    runtime.eventBus.subscribe([runtimePtr](const WorldEvent& evt,
+                                            WorldControlContext&,
+                                            WorldRuntimeContext&) {
+        if (!runtimePtr) return;
+        if (evt.type == WorldEventType::BaseDestroyed) {
+            const char* baseLabel = (evt.faction == Faction::A) ? "A" : "B";
+            enqueueRuntimeUi(*runtimePtr, std::nullopt,
+                             std::string("Base ") + baseLabel + " destroyed");
+        } else if (evt.type == WorldEventType::GameEnded) {
+            const char* winner = (evt.faction == Faction::A) ? "A" : "B";
+            enqueueRuntimeUi(*runtimePtr, std::nullopt,
+                             std::string("Winner: ") + winner);
+        }
+    });
 }
 
 
@@ -2013,6 +1989,7 @@ void GameWorld::update(float dt) {
     WorldControlContext controlCtx(control);
 
     runtimeCtx.drainUiEvents(controlCtx);
+    runtimeCtx.eventBus.drain(controlCtx, runtimeCtx);
     {
         std::unique_lock<std::shared_mutex> lock(runtimeCtx.worldMutex);
         controlCtx.processCommands(data, runtimeCtx);
@@ -2556,12 +2533,50 @@ void GameWorld::update(float dt) {
             }
         }
 
+        const bool baseAAliveBefore = state.baseA && !state.baseA->isDestroyed();
+        const bool baseBAliveBefore = state.baseB && !state.baseB->isDestroyed();
+
         for (const auto& entry : damageByTarget) {
             AttackableType type = static_cast<AttackableType>(entry.first.first);
             int targetId = entry.first.second;
             auto target = resolveTarget(targetId, type);
             if (target) {
                 target->takeDamage(entry.second);
+                WorldEvent evt;
+                evt.type = WorldEventType::UnitDamaged;
+                evt.targetType = type;
+                evt.targetId = targetId;
+                evt.value = entry.second;
+                evt.faction = target->getFaction();
+                evt.pos = target->getPos();
+                runtimeCtx.eventBus.publish(evt);
+            }
+        }
+
+        const bool baseAAliveAfter = state.baseA && !state.baseA->isDestroyed();
+        const bool baseBAliveAfter = state.baseB && !state.baseB->isDestroyed();
+        if (baseAAliveBefore && !baseAAliveAfter) {
+            WorldEvent evt;
+            evt.type = WorldEventType::BaseDestroyed;
+            evt.faction = Faction::A;
+            runtimeCtx.eventBus.publish(evt);
+            if (baseBAliveAfter) {
+                WorldEvent ended;
+                ended.type = WorldEventType::GameEnded;
+                ended.faction = Faction::B;
+                runtimeCtx.eventBus.publish(ended);
+            }
+        }
+        if (baseBAliveBefore && !baseBAliveAfter) {
+            WorldEvent evt;
+            evt.type = WorldEventType::BaseDestroyed;
+            evt.faction = Faction::B;
+            runtimeCtx.eventBus.publish(evt);
+            if (baseAAliveAfter) {
+                WorldEvent ended;
+                ended.type = WorldEventType::GameEnded;
+                ended.faction = Faction::A;
+                runtimeCtx.eventBus.publish(ended);
             }
         }
 
@@ -2593,6 +2608,26 @@ void GameWorld::update(float dt) {
             std::unique(damagedUnits.begin(), damagedUnits.end()),
             damagedUnits.end()
         );
+
+        auto findUnitAny = [&](int id) -> std::shared_ptr<Unit> {
+            for (auto& u : state.unitsA) {
+                if (u && u->id == id) return u;
+            }
+            for (auto& u : state.unitsB) {
+                if (u && u->id == id) return u;
+            }
+            return nullptr;
+        };
+        for (int id : damagedUnits) {
+            auto u = findUnitAny(id);
+            if (!u || u->isAlive()) continue;
+            WorldEvent evt;
+            evt.type = WorldEventType::UnitDied;
+            evt.unitId = id;
+            evt.faction = u->getFaction();
+            evt.pos = u->getPos();
+            runtimeCtx.eventBus.publish(evt);
+        }
 
         for (auto& u : allUnits) {
             if (!u || !u->behavior || !u->isAlive()) continue;
@@ -3098,4 +3133,10 @@ void WorldControlContext::cancelTargeting() {
 
 void WorldControlContext::commitTargeting() {
     resetTargeting();
+}
+
+std::shared_ptr<Unit> UnitFactory::create(UnitType type,
+                                          const Coord& start,
+                                          Faction faction) {
+    return std::make_shared<Unit>(type, start, faction);
 }
