@@ -6,8 +6,12 @@
 #include <queue>
 #include <array>
 #include <cstddef>
+#include <functional>
+#include <unordered_map>
+#include <unordered_set>
 #include "utils/vec2.hpp"
 #include "Iattackable.hpp"
+#include "map.hpp"
 
 
 // 前置声明
@@ -156,6 +160,313 @@ public:
 
     virtual MovementState snapshot() const = 0;
     virtual void applyState(MovementState state) = 0;
+};
+
+struct AttackableKey {
+    int id = -1;
+    AttackableType type = AttackableType::UNIT;
+
+    bool operator==(const AttackableKey& other) const {
+        return id == other.id && type == other.type;
+    }
+
+    static AttackableKey from(const std::shared_ptr<IAttackable>& target);
+};
+
+struct AttackableKeyHash {
+    std::size_t operator()(const AttackableKey& key) const {
+        std::size_t h1 = std::hash<int>{}(key.id);
+        std::size_t h2 = std::hash<int>{}(static_cast<int>(key.type));
+        return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+struct MoveIntent {
+    int unitId = -1;
+    Coord from{};
+    Coord to{};
+    bool hasMove = false;
+    bool commandMove = false;
+    bool setIdle = false;
+    MoveReason reason = MoveReason::None;
+    std::array<Coord, 3> candidates{};
+    int candidateCount = 0;
+    bool retreating = false;
+    float retreatTimer = 0.f;
+    Coord retreatAnchor{};
+    bool hasRetreatAnchor = false;
+    IMovementBehavior::MovementState nextState;
+};
+
+struct AttackIntent {
+    int attackerId = -1;
+    int targetId = -1;
+    AttackableType targetType = AttackableType::UNIT;
+    float damage = 0.f;
+    int nextTargetId = -1;
+    AttackableType nextTargetType = AttackableType::UNIT;
+    float nextCooldown = 0.f;
+    float nextCommitTimer = 0.f;
+    int nextCommitTargetId = -1;
+    AttackableType nextCommitTargetType = AttackableType::UNIT;
+    CombatAction action = CombatAction::None;
+    bool didAttack = false;
+};
+
+struct AiScoring {
+    struct UnitSnapshot {
+        int id = -1;
+        UnitType type = UnitType::Infantry;
+        Faction faction = Faction::A;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        UnitStats stats{};
+        float cooldown = 0.f;
+        AttackableKey currentTarget{};
+        float commitTimer = 0.f;
+        AttackableKey commitTarget{};
+        bool commandAttackActive = false;
+        AttackableKey commandTarget{};
+        bool retreating = false;
+        float retreatTimer = 0.f;
+        Coord retreatAnchor{};
+        bool hasRetreatAnchor = false;
+        float timeSinceDamaged = 0.f;
+        float timeSinceDealtDamage = 0.f;
+        bool commandMoveActive = false;
+        LocomotionState locomotionState = LocomotionState::Idle;
+        CombatState combatState = CombatState::None;
+        MoveReason moveReason = MoveReason::None;
+        IMovementBehavior::MovementState movementState;
+    };
+
+    struct AttackableSnapshot {
+        AttackableKey key{};
+        AttackableType type = AttackableType::UNIT;
+        Faction faction = Faction::A;
+        UnitType unitType = UnitType::Infantry;
+        Coord pos{};
+        float hp = 0.f;
+        float maxHp = 0.f;
+        float attack = 0.f;
+        float attackRange = 0.f;
+        float armor = 0.f;
+        bool isBase = false;
+    };
+
+    struct TargetScoreParams {
+        float distanceWeight = 1.2f;
+        float threatWeight = 1.0f;
+        float ttkWeight = 1.4f;
+        float executeWeight = 0.9f;
+        float preferenceWeight = 1.2f;
+        float overkillWeight = 1.1f;
+        float lockWeight = 0.6f;
+        float baseWeight = 0.8f;
+        float baseThreatPenalty = 1.2f;
+        float baseFinishBonus = 0.7f;
+        float commitBonus = 0.8f;
+        float commitDuration = 0.6f;
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteRangeMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+        float siegeHoldTime = 0.8f;
+        float losPenalty = 1.2f;
+        float unreachablePenalty = 1.8f;
+        float availabilityWeight = 0.9f;
+        int availabilityCap = 8;
+    };
+
+    struct ActionParams {
+        float retreatHpFrac = 0.35f;
+        float threatRetreat = 32.f;
+        float kiteMargin = 0.8f;
+        float kiteExtraDist = 1.5f;
+        float siegeOpportunity = 1.25f;
+    };
+
+    struct RetreatParams {
+        float hpEnter = 0.35f;
+        float hpExit = 0.55f;
+        float threatEnter = 32.f;
+        float threatExit = 22.f;
+        float retreatMinTime = 0.8f;
+        int maxRetreatDist = 12;
+        int sampleRadius = 6;
+        float retreatFireThreat = 24.f;
+    };
+
+    struct OocParams {
+        float delay = 2.0f;
+        float regenRate = 0.08f;
+        float threatThreshold = 12.f;
+    };
+
+    struct TargetChoice {
+        const AttackableSnapshot* target = nullptr;
+        float score = -1e30f;
+        float baseOpportunity = 0.f;
+    };
+
+    static const TargetScoreParams kTargetParams;
+    static const ActionParams kActionParams;
+    static const RetreatParams kRetreatParams;
+    static const OocParams kOocParams;
+    static constexpr float kThreatRadius = 6.0f;
+};
+
+struct AiTargetScoring {
+    static float unitPreference(UnitType self, UnitType target);
+    static float basePreference(UnitType self);
+    static float threatScore(const AiScoring::AttackableSnapshot& target);
+    static float distanceScore(float dist);
+    static float ttkScore(const AiScoring::UnitSnapshot& self,
+                          const AiScoring::AttackableSnapshot& target);
+    static bool containsKey(const std::vector<const AiScoring::AttackableSnapshot*>& visible,
+                            const AttackableKey& key);
+    static std::vector<const AiScoring::AttackableSnapshot*> collectVisibleEnemies(
+        const AiScoring::UnitSnapshot& unit,
+        const Map& map,
+        const std::vector<AiScoring::AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys);
+    static float computeLocalThreat(const AiScoring::UnitSnapshot& self,
+                                    const std::vector<const AiScoring::AttackableSnapshot*>& enemies,
+                                    float radius);
+    static float computeLocalThreatWorld(const Unit& self,
+                                         const std::vector<std::shared_ptr<Unit>>& enemies,
+                                         float radius);
+    static int countNearbyAllies(const std::vector<AiScoring::UnitSnapshot>& allies,
+                                 const Coord& pos,
+                                 int radius);
+    static int countNearbyEnemies(const std::vector<const AiScoring::AttackableSnapshot*>& enemies,
+                                  const Coord& pos,
+                                  int radius);
+    static float baseOpportunityScore(const AiScoring::UnitSnapshot& self,
+                                      const AiScoring::AttackableSnapshot& base,
+                                      const std::vector<AiScoring::UnitSnapshot>& allies,
+                                      const std::vector<const AiScoring::AttackableSnapshot*>& enemies,
+                                      const AiScoring::TargetScoreParams& params,
+                                      float localThreat);
+    static float firingPositionAvailability(const AiScoring::UnitSnapshot& self,
+                                            const AiScoring::AttackableSnapshot& target,
+                                            const Map& map,
+                                            const MapQuery::ReachableGrid& reachable,
+                                            const std::unordered_set<std::uint64_t>& occ,
+                                            int cap);
+    static AiScoring::TargetChoice chooseTarget(
+        const AiScoring::UnitSnapshot& self,
+        const std::vector<const AiScoring::AttackableSnapshot*>& visible,
+        const std::vector<AiScoring::UnitSnapshot>& allies,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const AiScoring::TargetScoreParams& params,
+        const Map& map,
+        const MapQuery::ReachableGrid& reachable,
+        const std::unordered_set<std::uint64_t>& occ);
+    static float scoreTargetCandidate(
+        const AiScoring::UnitSnapshot& self,
+        const AiScoring::AttackableSnapshot& target,
+        const std::vector<AiScoring::UnitSnapshot>& allies,
+        const std::vector<const AiScoring::AttackableSnapshot*>& visible,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const AiScoring::TargetScoreParams& params,
+        const Map& map,
+        const MapQuery::ReachableGrid& reachable,
+        const std::unordered_set<std::uint64_t>& occ,
+        float localThreat,
+        float* baseOppOut);
+};
+
+struct CombatPlanner {
+    static CombatAction decideCombatAction(const AiScoring::UnitSnapshot& self,
+                                           const AiScoring::AttackableSnapshot* target,
+                                           float dist,
+                                           bool inRange,
+                                           float cdAfter,
+                                           float localThreat,
+                                           float baseOpportunity,
+                                           const AiScoring::ActionParams& params);
+    static float computeAttackDamage(const AiScoring::UnitSnapshot& self, const Map& map);
+    static float computeAttackCooldown(const AiScoring::UnitSnapshot& self, const Map& map);
+    static AttackIntent planAttackIntent(
+        const AiScoring::UnitSnapshot& unit,
+        float dt,
+        const Map& map,
+        const std::vector<AiScoring::AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const std::vector<AiScoring::UnitSnapshot>& allies,
+        const std::unordered_set<std::uint64_t>& occ);
+};
+
+struct MovementPlanner {
+    static float movementSpend(const AiScoring::UnitSnapshot& unit, const Tile& tile);
+    static MoveIntent planMoveIntent(
+        const AiScoring::UnitSnapshot& unit,
+        float dt,
+        const Map& map,
+        const std::vector<AiScoring::AttackableSnapshot>& enemies,
+        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
+        const std::vector<AttackableKey>& forcedKeys,
+        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
+        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
+        const std::vector<AiScoring::UnitSnapshot>& allies,
+        bool baseAlive,
+        const Coord& basePos,
+        const std::unordered_set<std::uint64_t>& occ);
+
+private:
+    static float computeThreatAtCoord(const Coord& pos,
+                                      const std::vector<AiScoring::AttackableSnapshot>& enemies,
+                                      float radius);
+    static float heatAt(const std::vector<float>& heat, int width, const Coord& c);
+    static void addHeat(std::vector<float>& heat, int width, int height,
+                        const Coord& c, float value);
+    static std::vector<float> buildHeatMap(const Map& map,
+                                           const std::vector<AiScoring::UnitSnapshot>& allies,
+                                           const std::unordered_set<std::uint64_t>& occ,
+                                           int selfId);
+    static Coord applyAnchorSlot(const Map& map,
+                                 const std::unordered_set<std::uint64_t>& occ,
+                                 const Coord& anchor,
+                                 int unitId,
+                                 const Coord& selfPos);
+    static Coord stepAlongManhattan(const Coord& from, const Coord& to, int steps);
+    static void fillMoveCandidates(const AiScoring::UnitSnapshot& unit,
+                                   const Map& map,
+                                   const Coord& goal,
+                                   const std::vector<float>& heat,
+                                   const std::unordered_set<std::uint64_t>& occ,
+                                   MoveIntent& intent);
+    static bool selectAttackPosition(const AiScoring::UnitSnapshot& self,
+                                     const AiScoring::AttackableSnapshot& target,
+                                     const Map& map,
+                                     const std::vector<AiScoring::AttackableSnapshot>& enemies,
+                                     const MapQuery::ReachableGrid& reachable,
+                                     const std::unordered_set<std::uint64_t>& occ,
+                                     int minDist,
+                                     int maxDist,
+                                     Coord& outPos);
+    static Coord chooseSafeSpot(const AiScoring::UnitSnapshot& self,
+                                const Map& map,
+                                const std::vector<AiScoring::AttackableSnapshot>& enemies,
+                                int sampleRadius);
+    static void rebuildPathState(const AiScoring::UnitSnapshot& unit,
+                                 const Map& map,
+                                 const Coord& target,
+                                 IMovementBehavior::MovementState& state);
+    static void rebuildPathStateHeat(const AiScoring::UnitSnapshot& unit,
+                                     const Map& map,
+                                     const Coord& target,
+                                     const std::vector<float>& heat,
+                                     IMovementBehavior::MovementState& state);
 };
 
 class DefaultMovementBehavior : public IMovementBehavior {

@@ -14,20 +14,20 @@
 #include <vector>
 
 
-namespace {
-    float measureTextWidth(const sf::Font& font,
-                            const std::string& text,
-                            unsigned int size)
+struct TextLayout {
+    static float measureTextWidth(const sf::Font& font,
+                                  const std::string& text,
+                                  unsigned int size)
     {
         sf::Text measure(font, text);
         measure.setCharacterSize(size);
         return measure.getLocalBounds().size.x;
     }
 
-    std::vector<std::string> wrapText(const sf::Font& font,
-                                      const std::string& text,
-                                      unsigned int size,
-                                      float maxWidth)
+    static std::vector<std::string> wrapText(const sf::Font& font,
+                                             const std::string& text,
+                                             unsigned int size,
+                                             float maxWidth)
     {
         std::vector<std::string> lines;
         if (text.empty()) {
@@ -84,8 +84,10 @@ namespace {
         }
         return lines;
     }
+};
 
-    std::filesystem::path resolveAssetPath(const std::filesystem::path& relative) {
+struct AssetResolver {
+    static std::filesystem::path resolveAssetPath(const std::filesystem::path& relative) {
         std::filesystem::path base = std::filesystem::current_path();
         for (int i = 0; i < 4; ++i) {
             auto candidate = base / relative;
@@ -97,31 +99,35 @@ namespace {
         }
         return relative;
     }
+};
 
-    void clearScreen() {
-        #ifdef _WIN32
-            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (hOut == INVALID_HANDLE_VALUE) return;
+struct ConsoleUtil {
+    static void clearScreen() {
+    #ifdef _WIN32
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hOut == INVALID_HANDLE_VALUE) return;
 
-            CONSOLE_SCREEN_BUFFER_INFO csbi;
-            if (!GetConsoleScreenBufferInfo(hOut, &csbi)) return;
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (!GetConsoleScreenBufferInfo(hOut, &csbi)) return;
 
-            DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
-            DWORD count;
-            COORD home = {0, 0};
+        DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
+        DWORD count;
+        COORD home = {0, 0};
 
-            FillConsoleOutputCharacter(hOut, ' ', cellCount, home, &count);
-            FillConsoleOutputAttribute(hOut, csbi.wAttributes, cellCount, home, &count);
-            SetConsoleCursorPosition(hOut, home);
-        #else
-            std::cout << "\x1b[2J\x1b[H";
-        #endif
+        FillConsoleOutputCharacter(hOut, ' ', cellCount, home, &count);
+        FillConsoleOutputAttribute(hOut, csbi.wAttributes, cellCount, home, &count);
+        SetConsoleCursorPosition(hOut, home);
+    #else
+        std::cout << "\x1b[2J\x1b[H";
+    #endif
     }
+};
 
-    sf::IntRect rectFromPixels(int x, int y, int w, int h) {
+struct RenderUtil {
+    static sf::IntRect rectFromPixels(int x, int y, int w, int h) {
         return sf::IntRect{{x, y}, {w, h}};
     }
-}
+};
 
 RenderSystem::RenderSystem() : fontLoaded(false) {
     clock.restart();
@@ -131,7 +137,7 @@ RenderSystem::RenderSystem() : fontLoaded(false) {
 
 void RenderSystem::ensureFontLoaded() {
     if(fontLoaded) return;
-    auto path = resolveAssetPath("assets/NotoSansMono-VariableFont_wdth,wght.ttf");
+    auto path = AssetResolver::resolveAssetPath("assets/NotoSansMono-VariableFont_wdth,wght.ttf");
     if(hudFont.openFromFile(path.string())) {
         fontLoaded = true;
     } else {
@@ -141,7 +147,7 @@ void RenderSystem::ensureFontLoaded() {
 
 void RenderSystem::loadTextures() {
     if (texturesLoaded) return;
-    auto tilesheetPath = resolveAssetPath(
+    auto tilesheetPath = AssetResolver::resolveAssetPath(
         "assets/kenney/medieval_rts/Tilesheet/medieval_tilesheet.png");
     bool tilesOk = tilesheetTexture.loadFromFile(tilesheetPath.string());
     texturesLoaded = tilesOk;
@@ -154,14 +160,14 @@ void RenderSystem::loadTextures() {
 }
 
 void RenderSystem::initAtlasMapping() {
-    tileAtlas.plain        = rectFromPixels(126,  30, 68, 68);
-    tileAtlas.swamp        = rectFromPixels(318,  30, 68, 68);
-    tileAtlas.river        = rectFromPixels(126, 222, 68, 68);
-    tileAtlas.hillBase     = rectFromPixels(222, 126, 68, 68);
-    tileAtlas.mountBase    = rectFromPixels(318, 222, 68, 68);
-    tileAtlas.forest       = rectFromPixels(222, 414, 68, 68);
-    tileAtlas.hillOverlay  = rectFromPixels(718, 430, 36, 38);
-    tileAtlas.mountOverlay = rectFromPixels(910, 430, 36, 38);
+    tileAtlas.plain        = RenderUtil::rectFromPixels(126,  30, 68, 68);
+    tileAtlas.swamp        = RenderUtil::rectFromPixels(318,  30, 68, 68);
+    tileAtlas.river        = RenderUtil::rectFromPixels(126, 222, 68, 68);
+    tileAtlas.hillBase     = RenderUtil::rectFromPixels(222, 126, 68, 68);
+    tileAtlas.mountBase    = RenderUtil::rectFromPixels(318, 222, 68, 68);
+    tileAtlas.forest       = RenderUtil::rectFromPixels(222, 414, 68, 68);
+    tileAtlas.hillOverlay  = RenderUtil::rectFromPixels(718, 430, 36, 38);
+    tileAtlas.mountOverlay = RenderUtil::rectFromPixels(910, 430, 36, 38);
 
     tileRects[static_cast<std::size_t>(TileType::PLAIN)] =
         tileAtlas.plain;
@@ -176,21 +182,21 @@ void RenderSystem::initAtlasMapping() {
     tileRects[static_cast<std::size_t>(TileType::MOUNTAIN)] =
         tileAtlas.mountBase;
 
-    baseRect = rectFromPixels(1568, 56, 64, 42);
+    baseRect = RenderUtil::rectFromPixels(1568, 56, 64, 42);
 
     unitRectsA[static_cast<std::size_t>(UnitType::Infantry)] =
-        rectFromPixels(1110, 434, 20, 28);
+        RenderUtil::rectFromPixels(1110, 434, 20, 28);
     unitRectsA[static_cast<std::size_t>(UnitType::Archer)] =
-        rectFromPixels(1300, 432, 22, 30);
+        RenderUtil::rectFromPixels(1300, 432, 22, 30);
     unitRectsA[static_cast<std::size_t>(UnitType::Knight)] =
-        rectFromPixels(1492, 434, 22, 28);
+        RenderUtil::rectFromPixels(1492, 434, 22, 28);
 
     unitRectsB[static_cast<std::size_t>(UnitType::Infantry)] =
-        rectFromPixels(1110, 338, 20, 28);
+        RenderUtil::rectFromPixels(1110, 338, 20, 28);
     unitRectsB[static_cast<std::size_t>(UnitType::Archer)] =
-        rectFromPixels(1300, 336, 22, 30);
+        RenderUtil::rectFromPixels(1300, 336, 22, 30);
     unitRectsB[static_cast<std::size_t>(UnitType::Knight)] =
-        rectFromPixels(1492, 338, 22, 28);
+        RenderUtil::rectFromPixels(1492, 338, 22, 28);
 }
 
 sf::IntRect RenderSystem::tilesheetRect(int col, int row) const {
@@ -266,7 +272,7 @@ void RenderSystem::renderAscii(const WorldDataContext& data) {
 
     // 2. 如果是第一次渲染/尺寸变化 → 简单粗暴清屏全画一次
     if (lastBuffer.size() != buffer.size()) {
-        clearScreen();
+        ConsoleUtil::clearScreen();
         for (int y = 0; y < H; ++y) {
             std::cout << buffer[y] << "\n";
         }
@@ -749,18 +755,24 @@ void RenderSystem::drawCommandPanel(const WorldControlContext& control,
     const float boxWidth = std::max(280.f, static_cast<float>(window.getSize().x) - layout.hudX - 24.f);
 
     const float labelWidth = std::max(
-        measureTextWidth(hudFont, "CMD>", inputSize),
-        std::max(measureTextWidth(hudFont, "LAST", bodySize),
-                 measureTextWidth(hudFont, "STATUS", bodySize))
+        TextLayout::measureTextWidth(hudFont, "CMD>", inputSize),
+        std::max(TextLayout::measureTextWidth(hudFont, "LAST", bodySize),
+                 TextLayout::measureTextWidth(hudFont, "STATUS", bodySize))
     );
 
     const float contentWidth = std::max(80.f, boxWidth - padding * 2.f - labelWidth - labelGap);
-    const auto inputLines = wrapText(hudFont,
-                                     inputBuffer + (inputActive ? "_" : ""),
-                                     inputSize,
-                                     contentWidth);
-    const auto lastLines = wrapText(hudFont, control.lastCommandInput, bodySize, contentWidth);
-    const auto statusLines = wrapText(hudFont, control.lastCommandFeedback, bodySize, contentWidth);
+    const auto inputLines = TextLayout::wrapText(hudFont,
+                                                 inputBuffer + (inputActive ? "_" : ""),
+                                                 inputSize,
+                                                 contentWidth);
+    const auto lastLines = TextLayout::wrapText(hudFont,
+                                                control.lastCommandInput,
+                                                bodySize,
+                                                contentWidth);
+    const auto statusLines = TextLayout::wrapText(hudFont,
+                                                  control.lastCommandFeedback,
+                                                  bodySize,
+                                                  contentWidth);
 
     const float titleLine = hudFont.getLineSpacing(titleSize);
     const float inputLine = hudFont.getLineSpacing(inputSize);

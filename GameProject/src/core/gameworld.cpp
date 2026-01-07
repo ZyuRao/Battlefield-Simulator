@@ -15,1317 +15,73 @@
 #include <limits>
 
 
-namespace {
-    constexpr int MAP_WIDTH = 30;
-    constexpr int MAP_HEIGHT = 30;
-    constexpr float kHeatAlpha = 0.35f;
-    constexpr float kHeatOcc = 1.0f;
-    constexpr float kHeatTarget = 0.6f;
-    constexpr float kHeatNeighborScale = 0.5f;
-
-    // 在一个矩形区域内寻找第一个可通行格子
-    bool findPassableInRegion(const Map& map,
-                              int x0, int y0, int x1, int y1,
-                              Coord& out)
-    {
-        x0 = std::max(0, x0);
-        y0 = std::max(0, y0);
-        x1 = std::min(map.getWidth()  - 1, x1);
-        y1 = std::min(map.getHeight() - 1, y1);
-
-        for (int y = y0; y <= y1; ++y) {
-            for (int x = x0; x <= x1; ++x) {
-                Coord c{x, y};
-                if (map.getTile(c).isPassable()) {
-                    out = c;
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-    bool pickBasePositions(const Map& map, Coord& baseA, Coord& baseB)
-    {
-        const int w = map.getWidth();
-        const int h = map.getHeight();
-
-        // 左上角附近
-        Coord a;
-        if (!findPassableInRegion(map,
-                                  1, 1,
-                                  std::min(5, w-2), std::min(5, h-2),
-                                  a)) {
-            return false;
-        }
-
-        // 右下角附近
-        Coord b;
-        if (!findPassableInRegion(map,
-                                  std::max(w-6, 1), std::max(h-6, 1),
-                                  w-2, h-2,
-                                  b)) {
-            return false;
-        }
-
-        if (!map.isReachable(a, b)) {
-            return false;
-        }
-
-        baseA = a;
-        baseB = b;
-        return true;
-    }
-
-    AttackableKey attackableKey(const std::shared_ptr<IAttackable>& target) {
-        AttackableKey key;
-        if (!target) return key;
-        key.type = target->getAttackType();
-        if (key.type == AttackableType::BASE) {
-            auto basePtr = std::dynamic_pointer_cast<Base>(target);
-            key.id = basePtr ? basePtr->getId() : -1;
-        } else {
-            auto unitPtr = std::dynamic_pointer_cast<Unit>(target);
-            key.id = unitPtr ? unitPtr->getId() : -1;
-        }
-        return key;
-    }
-
-    using UnitSnapshot = AiScoring::UnitSnapshot;
-    using AttackableSnapshot = AiScoring::AttackableSnapshot;
-    using TargetScoreParams = AiScoring::TargetScoreParams;
-    using ActionParams = AiScoring::ActionParams;
-    using RetreatParams = AiScoring::RetreatParams;
-    using OocParams = AiScoring::OocParams;
-    using ReachableGrid = AiScoring::ReachableGrid;
-    using TargetChoice = AiScoring::TargetChoice;
-
-    const TargetScoreParams& kTargetParams = AiScoring::kTargetParams;
-    const ActionParams& kActionParams = AiScoring::kActionParams;
-    const RetreatParams& kRetreatParams = AiScoring::kRetreatParams;
-    const OocParams& kOocParams = AiScoring::kOocParams;
-    constexpr float kThreatRadius = AiScoring::kThreatRadius;
-
-    float unitPreference(UnitType self, UnitType target) {
-        static const float prefs[3][3] = {
-            {1.5f, 1.0f, 1.2f},  // Infantry vs {Infantry, Archer, Knight}
-            {1.0f, 1.5f, 1.2f},  // Archer
-            {1.2f, 0.9f, 1.3f}   // Knight
-        };
-        return prefs[static_cast<int>(self)][static_cast<int>(target)];
-    }
-
-    float basePreference(UnitType self) {
-        switch (self) {
-            case UnitType::Infantry: return 0.9f;
-            case UnitType::Archer:   return 0.7f;
-            case UnitType::Knight:   return 1.1f;
-        }
-        return 1.0f;
-    }
-
-    float threatScore(const AttackableSnapshot& target) {
-        if (target.isBase) return 0.f;
-        return target.attack * (0.6f + 0.12f * target.attackRange);
-    }
-
-    float distanceScore(float dist) {
-        return 1.0f / (1.0f + dist);
-    }
-
-    float ttkScore(const UnitSnapshot& self, const AttackableSnapshot& target) {
-        float dps = std::max(1.0f, self.stats.attack);
-        float ttk = target.hp / dps;
-        return 1.0f / (1.0f + ttk);
-    }
-
-    bool containsKey(const std::vector<const AttackableSnapshot*>& visible,
-                     const AttackableKey& key) {
-        for (const auto* v : visible) {
-            if (v && v->key == key) return true;
-        }
-        return false;
-    }
-
-    std::vector<const AttackableSnapshot*> collectVisibleEnemies(
-        const UnitSnapshot& unit,
-        const Map& map,
-        const std::vector<AttackableSnapshot>& enemies,
-        const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-        const std::vector<AttackableKey>& forcedKeys)
-    {
-        std::vector<const AttackableSnapshot*> visible;
-        if (!map.inBounds(unit.pos)) return visible;
-
-        const Tile& tile = map.getTile(unit.pos);
-        float effVision = unit.stats.visionRange + tile.getVisionBonus();
-
-        for (const auto& e : enemies) {
-            if (!map.inBounds(e.pos)) continue;
-            float d = unit.pos.mhtDistanceTo(e.pos);
-            if (d <= effVision) {
-                visible.push_back(&e);
-            }
-        }
-
-        for (const auto& key : forcedKeys) {
-            auto it = enemyIndex.find(key);
-            if (it == enemyIndex.end()) continue;
-            const auto* target = &enemies[it->second];
-            if (!containsKey(visible, target->key)) {
-                visible.push_back(target);
-            }
-        }
-
-        return visible;
-    }
-
-    float computeLocalThreat(const UnitSnapshot& self,
-                             const std::vector<const AttackableSnapshot*>& enemies,
-                             float radius) {
-        float threat = 0.f;
-        for (const auto* e : enemies) {
-            if (!e || e->isBase) continue;
-            float dist = self.pos.mhtDistanceTo(e->pos);
-            if (dist <= radius) {
-                threat += threatScore(*e);
-            }
-        }
-        return threat;
-    }
-
-    int countNearbyAllies(const std::vector<UnitSnapshot>& allies,
-                          const Coord& pos,
-                          int radius) {
-        int count = 0;
-        for (const auto& ally : allies) {
-            if (ally.hp <= 0.f) continue;
-            if (ally.pos.mhtDistanceTo(pos) <= radius) {
-                ++count;
-            }
-        }
-        return count;
-    }
-
-    int countNearbyEnemies(const std::vector<const AttackableSnapshot*>& enemies,
-                           const Coord& pos,
-                           int radius) {
-        int count = 0;
-        for (const auto* e : enemies) {
-            if (!e || e->isBase) continue;
-            if (e->pos.mhtDistanceTo(pos) <= radius) {
-                ++count;
-            }
-        }
-        return count;
-    }
-
-    float baseOpportunityScore(const UnitSnapshot& self,
-                               const AttackableSnapshot& base,
-                               const std::vector<UnitSnapshot>& allies,
-                               const std::vector<const AttackableSnapshot*>& enemies,
-                               const TargetScoreParams& params,
-                               float localThreat) {
-        int allyNear = countNearbyAllies(allies, base.pos, 6);
-        int enemyNear = countNearbyEnemies(enemies, base.pos, 6);
-        float advantage = (allyNear + 1.0f) / (enemyNear + 1.0f);
-        float hpFrac = (base.maxHp > 0.f) ? (base.hp / base.maxHp) : 1.0f;
-        float finishBonus = 1.0f + (1.0f - hpFrac) * params.baseFinishBonus;
-        float threatPenalty = (localThreat >= params.threatRetreat) ? 0.6f : 1.0f;
-        return advantage * finishBonus * threatPenalty;
-    }
-
-    std::uint64_t packCoord(const Coord& c);
-
-    ReachableGrid buildReachableGrid(const Map& map, const Coord& start) {
-        ReachableGrid grid;
-        grid.width = map.getWidth();
-        grid.height = map.getHeight();
-        grid.reachable.assign(static_cast<std::size_t>(grid.width * grid.height), 0);
-
-        if (!map.inBounds(start)) return grid;
-        if (!map.getTile(start).isPassable()) return grid;
-
-        std::queue<Coord> q;
-        std::vector<Coord> nbrs;
-        q.push(start);
-        grid.reachable[static_cast<std::size_t>(start.y) * grid.width + start.x] = 1;
-
-        while (!q.empty()) {
-            Coord cur = q.front();
-            q.pop();
-            map.getNeighbors(cur, nbrs);
-            for (const auto& n : nbrs) {
-                if (!map.inBounds(n)) continue;
-                if (!map.getTile(n).isPassable()) continue;
-                std::size_t idx = static_cast<std::size_t>(n.y) * grid.width + n.x;
-                if (grid.reachable[idx]) continue;
-                grid.reachable[idx] = 1;
-                q.push(n);
-            }
-        }
-
-        return grid;
-    }
-
-    float firingPositionAvailability(const UnitSnapshot& self,
-                                     const AttackableSnapshot& target,
-                                     const Map& map,
-                                     const ReachableGrid& reachable,
-                                     const std::unordered_set<std::uint64_t>& occ,
-                                     int cap) {
-        int range = static_cast<int>(std::floor(self.stats.attackRange + 0.001f));
-        if (range <= 0) return 0.f;
-
-        int count = 0;
-        int minX = target.pos.x - range;
-        int maxX = target.pos.x + range;
-        int minY = target.pos.y - range;
-        int maxY = target.pos.y + range;
-
-        for (int y = minY; y <= maxY; ++y) {
-            for (int x = minX; x <= maxX; ++x) {
-                Coord cand{x, y};
-                if (!map.inBounds(cand)) continue;
-                if (std::abs(cand.x - target.pos.x) + std::abs(cand.y - target.pos.y) > range) {
-                    continue;
-                }
-                if (!map.getTile(cand).isPassable()) continue;
-                if (!reachable.isReachable(cand)) continue;
-                if (map.hasMountainBetween(cand, target.pos)) continue;
-                auto key = packCoord(cand);
-                if (cand != self.pos && occ.find(key) != occ.end()) continue;
-                ++count;
-                if (count >= cap) {
-                    return 1.0f;
-                }
-            }
-        }
-        if (cap <= 0) return 0.f;
-        return static_cast<float>(count) / static_cast<float>(cap);
-    }
-
-    float scoreTargetCandidate(
-        const UnitSnapshot& self,
-        const AttackableSnapshot& target,
-        const std::vector<UnitSnapshot>& allies,
-        const std::vector<const AttackableSnapshot*>& visible,
-        const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-        const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-        const TargetScoreParams& params,
-        const Map& map,
-        const ReachableGrid& reachable,
-        const std::unordered_set<std::uint64_t>& occ,
-        float localThreat,
-        float* baseOppOut) {
-        float dist = self.pos.mhtDistanceTo(target.pos);
-        float score = 0.f;
-        score += params.distanceWeight * distanceScore(dist);
-        score += params.threatWeight * threatScore(target);
-        score += params.ttkWeight * ttkScore(self, target);
-        float hpFrac = (target.maxHp > 0.f) ? (target.hp / target.maxHp) : 1.0f;
-        score += params.executeWeight * (1.0f - hpFrac);
-
-        if (map.hasMountainBetween(self.pos, target.pos)) {
-            score -= params.losPenalty;
-        }
-        float availability = firingPositionAvailability(self, target, map, reachable,
-                                                         occ, params.availabilityCap);
-        score += params.availabilityWeight * availability;
-        if (availability <= 0.f) {
-            score -= params.unreachablePenalty;
-        }
-
-        float baseOpportunity = 0.f;
-        if (target.isBase) {
-            baseOpportunity = baseOpportunityScore(self, target, allies, visible,
-                                                   params, localThreat);
-            score += params.baseWeight * basePreference(self.type) * baseOpportunity;
-            score -= params.baseThreatPenalty * (localThreat / params.threatRetreat);
-        } else {
-            score += params.preferenceWeight * unitPreference(self.type, target.unitType);
-        }
-
-        auto incIt = incomingDamage.find(target.key);
-        if (incIt != incomingDamage.end() && target.maxHp > 0.f) {
-            score -= params.overkillWeight * (incIt->second / target.maxHp);
-        }
-        auto lockIt = lockedCounts.find(target.key);
-        if (lockIt != lockedCounts.end()) {
-            score -= params.lockWeight * static_cast<float>(lockIt->second);
-        }
-
-        if (target.key == self.commitTarget) {
-            score += params.commitBonus;
-        }
-        if (target.key == self.currentTarget) {
-            score += params.commitBonus * 0.5f;
-        }
-
-        if (baseOppOut) {
-            *baseOppOut = baseOpportunity;
-        }
-        return score;
-    }
-
-    TargetChoice chooseTarget(const UnitSnapshot& self,
-                              const std::vector<const AttackableSnapshot*>& visible,
-                              const std::vector<UnitSnapshot>& allies,
-                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-                              const TargetScoreParams& params,
-                              const Map& map,
-                              const ReachableGrid& reachable,
-                              const std::unordered_set<std::uint64_t>& occ) {
-        TargetChoice best;
-        if (visible.empty()) return best;
-
-        float localThreat = computeLocalThreat(self, visible, kThreatRadius);
-        float hpFrac = (self.maxHp > 0.f) ? (self.hp / self.maxHp) : 1.0f;
-        if (self.commitTimer > 0.f &&
-            hpFrac > params.retreatHpFrac &&
-            localThreat < params.threatRetreat) {
-            for (const auto* v : visible) {
-                if (v && v->key == self.commitTarget) {
-                    best.target = v;
-                    best.score = 0.f;
-                    if (v->isBase) {
-                        best.baseOpportunity = baseOpportunityScore(self, *v, allies, visible,
-                                                                   params, localThreat);
-                    }
-                    return best;
-                }
-            }
-        }
-
-        for (const auto* v : visible) {
-            if (!v) continue;
-            float baseOpp = 0.f;
-            float score = scoreTargetCandidate(self, *v, allies, visible,
-                                               incomingDamage, lockedCounts,
-                                               params, map, reachable, occ,
-                                               localThreat, &baseOpp);
-
-            bool better = false;
-            if (!best.target) {
-                better = true;
-            } else if (score > best.score + 1e-4f) {
-                better = true;
-            } else if (std::abs(score - best.score) <= 1e-4f) {
-                if (v->key.type < best.target->key.type ||
-                    (v->key.type == best.target->key.type && v->key.id < best.target->key.id)) {
-                    better = true;
-                }
-            }
-
-            if (better) {
-                best.target = v;
-                best.score = score;
-                best.baseOpportunity = baseOpp;
-            }
-        }
-
-        return best;
-    }
-
-    bool inAttackRange(const UnitSnapshot& self,
-                       const Map& map,
-                       const AttackableSnapshot& target) {
-        const Tile& tile = map.getTile(self.pos);
-        float effectiveRange = self.stats.attackRange + tile.getVisionBonus();
-        float dist = self.pos.mhtDistanceTo(target.pos);
-        if (dist > effectiveRange) return false;
-        if (map.hasMountainBetween(self.pos, target.pos)) return false;
-        if (self.stats.attackRange <= 2.0f &&
-            map.hasRiverBetween(self.pos, target.pos)) {
-            return false;
-        }
-        return true;
-    }
-
-    bool inAttackRangeFrom(const UnitSnapshot& self,
-                           const Map& map,
-                           const AttackableSnapshot& target,
-                           const Coord& from) {
-        if (!map.inBounds(from)) return false;
-        const Tile& tile = map.getTile(from);
-        float effectiveRange = self.stats.attackRange + tile.getVisionBonus();
-        float dist = from.mhtDistanceTo(target.pos);
-        if (dist > effectiveRange) return false;
-        if (map.hasMountainBetween(from, target.pos)) return false;
-        if (self.stats.attackRange <= 2.0f &&
-            map.hasRiverBetween(from, target.pos)) {
-            return false;
-        }
-        return true;
-    }
-
-    float computeAttackDamage(const UnitSnapshot& self, const Map& map) {
-        const Tile& tile = map.getTile(self.pos);
-        float dmg = self.stats.attack + tile.getAttackBonus();
-        if (tile.getType() == TileType::HILL) {
-            dmg *= 0.85f;
-        }
-        return dmg;
-    }
-
-    float computeAttackCooldown(const UnitSnapshot& self, const Map& map) {
-        const Tile& tile = map.getTile(self.pos);
-        float cdBase = 0.8f;
-        if (tile.getType() == TileType::HILL) {
-            cdBase *= 1.25f;
-        }
-        return cdBase;
-    }
-
-    CombatAction decideCombatAction(const UnitSnapshot& self,
-                                    const AttackableSnapshot* target,
-                                    float dist,
-                                    bool inRange,
-                                    float cdAfter,
-                                    float localThreat,
-                                    float baseOpportunity,
-                                    const ActionParams& params) {
-        if (!target) return CombatAction::None;
-
-        (void)localThreat;
-        float hpFrac = (self.maxHp > 0.f) ? (self.hp / self.maxHp) : 1.0f;
-        if (hpFrac <= params.retreatHpFrac) {
-            return CombatAction::Retreat;
-        }
-        if (target->isBase && baseOpportunity >= params.siegeOpportunity) {
-            return CombatAction::Siege;
-        }
-
-        bool ranged = self.stats.attackRange > 2.5f;
-        if (inRange) {
-            if (ranged && cdAfter > 0.f &&
-                dist <= (self.stats.attackRange - params.kiteMargin)) {
-                return CombatAction::Kite;
-            }
-            return CombatAction::Attack;
-        }
-        return CombatAction::Chase;
-    }
-
-    AttackIntent planAttackIntent(const UnitSnapshot& unit,
-                                  float dt,
-                                  const Map& map,
-                                  const std::vector<AttackableSnapshot>& enemies,
-                                  const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-                                  const std::vector<AttackableKey>& forcedKeys,
-                                  const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-                                  const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-                                  const std::vector<UnitSnapshot>& allies,
-                                  const std::unordered_set<std::uint64_t>& occ) {
-        AttackIntent intent;
-        intent.attackerId = unit.id;
-        intent.nextCooldown = unit.cooldown;
-        intent.nextTargetId = unit.currentTarget.id;
-        intent.nextTargetType = unit.currentTarget.type;
-        intent.nextCommitTimer = std::max(0.0f, unit.commitTimer - dt);
-        intent.nextCommitTargetId = unit.commitTarget.id;
-        intent.nextCommitTargetType = unit.commitTarget.type;
-
-        if (unit.hp <= 0.f) return intent;
-
-        float cdAfter = std::max(0.0f, unit.cooldown - dt);
-
-        std::vector<const AttackableSnapshot*> visible =
-            collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
-        ReachableGrid reachable = buildReachableGrid(map, unit.pos);
-
-        TargetChoice choice = chooseTarget(unit, visible, allies,
-                                           incomingDamage, lockedCounts,
-                                           kTargetParams, map, reachable,
-                                           occ);
-        const AttackableSnapshot* target = choice.target;
-        bool commandOverride = false;
-        if (unit.commandAttackActive && unit.commandTarget.id >= 0) {
-            auto it = enemyIndex.find(unit.commandTarget);
-            if (it != enemyIndex.end()) {
-                target = &enemies[it->second];
-                commandOverride = true;
-            }
-        }
-        if (!commandOverride && unit.currentTarget.id >= 0) {
-            auto curIt = enemyIndex.find(unit.currentTarget);
-            if (curIt != enemyIndex.end()) {
-                const AttackableSnapshot* curTarget = &enemies[curIt->second];
-                if (curTarget && inAttackRange(unit, map, *curTarget)) {
-                    float localThreat = computeLocalThreat(unit, visible, kThreatRadius);
-                    float baseOpp = 0.f;
-                    float curScore = scoreTargetCandidate(unit, *curTarget, allies, visible,
-                                                          incomingDamage, lockedCounts,
-                                                          kTargetParams, map, reachable, occ,
-                                                          localThreat, &baseOpp);
-                    if (!target || (choice.score - curScore) <= kTargetParams.commitBonus) {
-                        target = curTarget;
-                        choice.baseOpportunity = baseOpp;
-                        choice.score = curScore;
-                    }
-                }
-            }
-        }
-        if (!target) {
-            intent.nextCooldown = cdAfter;
-            intent.nextTargetId = -1;
-            intent.nextCommitTimer = 0.f;
-            intent.nextCommitTargetId = -1;
-            intent.nextCommitTargetType = AttackableType::UNIT;
-            intent.action = CombatAction::None;
-            return intent;
-        }
-
-        intent.nextTargetId = target->key.id;
-        intent.nextTargetType = target->key.type;
-        intent.nextCommitTargetId = target->key.id;
-        intent.nextCommitTargetType = target->key.type;
-
-        float dist = unit.pos.mhtDistanceTo(target->pos);
-        bool inRange = inAttackRange(unit, map, *target);
-        float localThreat = computeLocalThreat(unit, visible, kThreatRadius);
-        intent.action = decideCombatAction(unit, target, dist, inRange, cdAfter,
-                                           localThreat, choice.baseOpportunity,
-                                           kActionParams);
-        float hpRatio = (unit.maxHp > 0.f) ? (unit.hp / unit.maxHp) : 1.0f;
-        bool enterRetreat = (hpRatio <= kRetreatParams.hpEnter);
-        bool exitRetreat = (hpRatio >= kRetreatParams.hpExit &&
-                            unit.retreatTimer <= 0.f);
-        bool retreatNow = unit.retreating ? !exitRetreat : enterRetreat;
-        if (retreatNow) {
-            intent.action = CombatAction::Retreat;
-        }
-        bool commitSame = (target->key == unit.commitTarget && unit.commitTimer > 0.f);
-        float commitDuration = (intent.action == CombatAction::Siege)
-            ? kTargetParams.siegeHoldTime
-            : kTargetParams.commitDuration;
-        intent.nextCommitTimer = commitSame ? std::max(0.0f, unit.commitTimer - dt)
-                                            : commitDuration;
-
-        bool allowRetreatFire = (intent.action != CombatAction::Retreat ||
-                                 localThreat < kRetreatParams.retreatFireThreat);
-        if (inRange && cdAfter <= 0.f && allowRetreatFire) {
-            intent.didAttack = true;
-            intent.targetId = target->key.id;
-            intent.targetType = target->key.type;
-            intent.damage = computeAttackDamage(unit, map);
-            intent.nextCooldown = computeAttackCooldown(unit, map);
-            return intent;
-        }
-
-        intent.nextCooldown = cdAfter;
-        return intent;
-    }
-
-    std::uint64_t packCoord(const Coord& c) {
-        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
-    }
-
-    Coord unpackCoord(std::uint64_t v) {
-        int x = static_cast<int>(static_cast<std::uint32_t>(v >> 32));
-        int y = static_cast<int>(static_cast<std::uint32_t>(v & 0xffffffffu));
-        return Coord{x, y};
-    }
-
-    std::uint32_t stableHash(int unitId, const Coord& c) {
-        std::uint32_t h = static_cast<std::uint32_t>(unitId) * 2654435761u;
-        h ^= static_cast<std::uint32_t>(c.x) * 2246822519u;
-        h ^= static_cast<std::uint32_t>(c.y) * 3266489917u;
-        return h;
-    }
-
-    float movementSpend(const UnitSnapshot& unit, const Tile& tile) {
-        float s = unit.stats.moveSpeed / tile.getMoveCost();
-        if (unit.type == UnitType::Knight) {
-            switch (tile.getType()) {
-                case TileType::PLAIN:  return s * 1.1f;
-                case TileType::FOREST: return s * 0.6f;
-                case TileType::HILL:   return s * 0.7f;
-                case TileType::SWAMP:  return s * 0.4f;
-                default: return s;
-            }
-        }
-        return s;
-    }
-
-    float computeThreatAtCoord(const Coord& pos,
-                               const std::vector<AttackableSnapshot>& enemies,
-                               float radius);
-
-    float heatAt(const std::vector<float>& heat, int width, const Coord& c) {
-        if (width <= 0 || heat.empty()) return 0.f;
-        std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
-        if (idx >= heat.size()) return 0.f;
-        return heat[idx];
-    }
-
-    void addHeat(std::vector<float>& heat, int width, int height,
-                 const Coord& c, float value) {
-        if (c.x < 0 || c.y < 0 || c.x >= width || c.y >= height) return;
-        std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
-        heat[idx] += value;
-    }
-
-    std::vector<float> buildHeatMap(const Map& map,
-                                    const std::vector<UnitSnapshot>& allies,
-                                    const std::unordered_set<std::uint64_t>& occ,
-                                    int selfId) {
-        const int width = map.getWidth();
-        const int height = map.getHeight();
-        std::vector<float> heat(static_cast<std::size_t>(width * height), 0.f);
-        static const std::array<Coord, 4> neighbors = {
-            Coord{1, 0}, Coord{-1, 0}, Coord{0, 1}, Coord{0, -1}
-        };
-
-        for (const auto& packed : occ) {
-            Coord c = unpackCoord(packed);
-            addHeat(heat, width, height, c, kHeatOcc);
-            for (const auto& off : neighbors) {
-                Coord n{c.x + off.x, c.y + off.y};
-                addHeat(heat, width, height, n, kHeatOcc * kHeatNeighborScale);
-            }
-        }
-
-        for (const auto& ally : allies) {
-            if (ally.id == selfId) continue;
-            Coord target{};
-            bool hasTarget = false;
-            if (!ally.movementState.path.empty()) {
-                target = ally.movementState.path.back();
-                hasTarget = true;
-            } else if (ally.movementState.hasLast) {
-                target = ally.movementState.lastTarget;
-                hasTarget = true;
-            }
-            if (!hasTarget) continue;
-            addHeat(heat, width, height, target, kHeatTarget);
-            for (const auto& off : neighbors) {
-                Coord n{target.x + off.x, target.y + off.y};
-                addHeat(heat, width, height, n, kHeatTarget * kHeatNeighborScale);
-            }
-        }
-
-        return heat;
-    }
-
-    bool findPathAStarHeat(const Map& map,
-                           const Coord& start,
-                           const Coord& goal,
-                           const std::vector<float>& heat,
-                           int unitId,
-                           std::vector<Coord>& outpath) {
-        outpath.clear();
-        if (!map.inBounds(start) || !map.inBounds(goal)) return false;
-        if (!map.getTile(start).isPassable() || !map.getTile(goal).isPassable()) return false;
-
-        const int width = map.getWidth();
-        const int height = map.getHeight();
-        struct Node {
-            Coord pos;
-            float g;
-            float f;
-            std::uint32_t tie;
-        };
-        auto cmp = [](const Node& a, const Node& b) {
-            if (std::abs(a.f - b.f) > 1e-4f) return a.f > b.f;
-            if (std::abs(a.g - b.g) > 1e-4f) return a.g > b.g;
-            return a.tie > b.tie;
-        };
-
-        std::priority_queue<Node, std::vector<Node>, decltype(cmp)> open(cmp);
-        std::vector<std::vector<float>> gScore(
-            height, std::vector<float>(width, 1e9f));
-        std::vector<std::vector<std::uint32_t>> tieScore(
-            height, std::vector<std::uint32_t>(width, std::numeric_limits<std::uint32_t>::max()));
-        std::vector<std::vector<Coord>> cameFrom(
-            height, std::vector<Coord>(width, Coord(-1, -1)));
-
-        gScore[start.y][start.x] = 0.0f;
-        std::uint32_t startTie = stableHash(unitId, start);
-        tieScore[start.y][start.x] = startTie;
-        open.push({start, 0.0f, static_cast<float>(Coord::mhtDistance(start, goal)), startTie});
-        std::vector<Coord> nbrs;
-
-        while (!open.empty()) {
-            Node cur = open.top();
-            open.pop();
-            if (cur.g > gScore[cur.pos.y][cur.pos.x] + 1e-4f) continue;
-
-            if (cur.pos == goal) {
-                Coord p = goal;
-                while (!(p == start)) {
-                    outpath.push_back(p);
-                    p = cameFrom[p.y][p.x];
-                }
-                outpath.push_back(start);
-                std::reverse(outpath.begin(), outpath.end());
+constexpr int MAP_WIDTH = 30;
+constexpr int MAP_HEIGHT = 30;
+
+using UnitSnapshot = AiScoring::UnitSnapshot;
+using AttackableSnapshot = AiScoring::AttackableSnapshot;
+using TargetChoice = AiScoring::TargetChoice;
+using ReachableGrid = MapQuery::ReachableGrid;
+
+struct MapPlacement {
+    static bool pickBasePositions(const Map& map, Coord& baseA, Coord& baseB);
+
+private:
+    static bool findPassableInRegion(const Map& map,
+                                     int x0, int y0, int x1, int y1,
+                                     Coord& out);
+};
+
+bool MapPlacement::findPassableInRegion(const Map& map,
+                                        int x0, int y0, int x1, int y1,
+                                        Coord& out) {
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+    x1 = std::min(map.getWidth()  - 1, x1);
+    y1 = std::min(map.getHeight() - 1, y1);
+
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            Coord c{x, y};
+            if (map.getTile(c).isPassable()) {
+                out = c;
                 return true;
             }
-
-            map.getNeighbors(cur.pos, nbrs);
-            for (const auto& n : nbrs) {
-                const Tile& t = map.getTile(n);
-                if (!t.isPassable()) continue;
-
-                float heatCost = kHeatAlpha * heatAt(heat, width, n);
-                float tentativeG = cur.g + t.getMoveCost() + heatCost;
-                std::uint32_t tie = stableHash(unitId, n);
-
-                bool better = false;
-                float prevG = gScore[n.y][n.x];
-                if (tentativeG < prevG - 1e-4f) {
-                    better = true;
-                } else if (std::abs(tentativeG - prevG) <= 1e-4f && tie < tieScore[n.y][n.x]) {
-                    better = true;
-                }
-                if (better) {
-                    gScore[n.y][n.x] = tentativeG;
-                    tieScore[n.y][n.x] = tie;
-                    cameFrom[n.y][n.x] = cur.pos;
-                    float f = tentativeG + static_cast<float>(Coord::mhtDistance(n, goal));
-                    open.push({n, tentativeG, f, tie});
-                }
-            }
         }
+    }
+    return false;
+}
+
+bool MapPlacement::pickBasePositions(const Map& map, Coord& baseA, Coord& baseB) {
+    const int w = map.getWidth();
+    const int h = map.getHeight();
+
+    // 左上角附近
+    Coord a;
+    if (!findPassableInRegion(map,
+                              1, 1,
+                              std::min(5, w-2), std::min(5, h-2),
+                              a)) {
         return false;
     }
 
-    void rebuildPathStateHeat(const UnitSnapshot& unit,
-                              const Map& map,
-                              const Coord& target,
-                              const std::vector<float>& heat,
-                              IMovementBehavior::MovementState& state) {
-        state.path.clear();
-        findPathAStarHeat(map, unit.pos, target, heat, unit.id, state.path);
-        state.idx = 0;
-        state.accumulator = 0.f;
-        state.lastTarget = target;
-        state.hasLast = true;
+    // 右下角附近
+    Coord b;
+    if (!findPassableInRegion(map,
+                              std::max(w-6, 1), std::max(h-6, 1),
+                              w-2, h-2,
+                              b)) {
+        return false;
     }
 
-    Coord applyAnchorSlot(const Map& map,
-                          const std::unordered_set<std::uint64_t>& occ,
-                          const Coord& anchor,
-                          int unitId,
-                          const Coord& selfPos) {
-        static const std::array<Coord, 13> slots = {
-            Coord{0, 0},
-            Coord{1, 0}, Coord{-1, 0}, Coord{0, 1}, Coord{0, -1},
-            Coord{1, 1}, Coord{-1, 1}, Coord{1, -1}, Coord{-1, -1},
-            Coord{2, 0}, Coord{-2, 0}, Coord{0, 2}, Coord{0, -2}
-        };
-        const std::size_t start = static_cast<std::size_t>(stableHash(unitId, anchor) % slots.size());
-        for (std::size_t i = 0; i < slots.size(); ++i) {
-            const auto& off = slots[(start + i) % slots.size()];
-            Coord cand{anchor.x + off.x, anchor.y + off.y};
-            if (!map.inBounds(cand)) continue;
-            if (!map.getTile(cand).isPassable()) continue;
-            if (cand != selfPos && occ.find(packCoord(cand)) != occ.end()) continue;
-            return cand;
-        }
-        return anchor;
+    if (!map.isReachable(a, b)) {
+        return false;
     }
 
-    Coord stepAlongManhattan(const Coord& from, const Coord& to, int steps) {
-        Coord out = from;
-        int dx = to.x - from.x;
-        int dy = to.y - from.y;
-        int sx = (dx > 0) - (dx < 0);
-        int sy = (dy > 0) - (dy < 0);
-        int ax = std::abs(dx);
-        int ay = std::abs(dy);
-        int remaining = steps;
-        while (remaining-- > 0 && (ax > 0 || ay > 0)) {
-            if (ax >= ay && ax > 0) {
-                out.x += sx;
-                --ax;
-            } else if (ay > 0) {
-                out.y += sy;
-                --ay;
-            } else {
-                break;
-            }
-        }
-        return out;
-    }
-
-    Coord clampToMap(const Map& map, Coord c) {
-        c.x = std::max(0, std::min(c.x, map.getWidth() - 1));
-        c.y = std::max(0, std::min(c.y, map.getHeight() - 1));
-        return c;
-    }
-
-    Coord nearestPassable(const Map& map, Coord c, int radius) {
-        c = clampToMap(map, c);
-        if (map.inBounds(c) && map.getTile(c).isPassable()) {
-            return c;
-        }
-        for (int r = 1; r <= radius; ++r) {
-            for (int dy = -r; dy <= r; ++dy) {
-                for (int dx = -r; dx <= r; ++dx) {
-                    Coord cand{c.x + dx, c.y + dy};
-                    if (!map.inBounds(cand)) continue;
-                    if (map.getTile(cand).isPassable()) return cand;
-                }
-            }
-        }
-        return c;
-    }
-
-    Coord nearestReachableToTarget(const Map& map,
-                                   const ReachableGrid& reachable,
-                                   const Coord& target) {
-        Coord best = target;
-        int bestDist = 0;
-        bool found = false;
-        for (int y = 0; y < map.getHeight(); ++y) {
-            for (int x = 0; x < map.getWidth(); ++x) {
-                Coord cand{x, y};
-                if (!map.getTile(cand).isPassable()) continue;
-                if (!reachable.isReachable(cand)) continue;
-                int dist = cand.mhtDistanceTo(target);
-                if (!found || dist < bestDist ||
-                    (dist == bestDist &&
-                     (cand.y < best.y || (cand.y == best.y && cand.x < best.x)))) {
-                    best = cand;
-                    bestDist = dist;
-                    found = true;
-                }
-            }
-        }
-        return found ? best : target;
-    }
-
-    void fillMoveCandidates(const UnitSnapshot& unit,
-                            const Map& map,
-                            const Coord& goal,
-                            const std::vector<float>& heat,
-                            const std::unordered_set<std::uint64_t>& occ,
-                            MoveIntent& intent) {
-        intent.candidateCount = 0;
-        auto pushCandidate = [&](const Coord& c) {
-            for (int i = 0; i < intent.candidateCount; ++i) {
-                if (intent.candidates[static_cast<std::size_t>(i)] == c) return;
-            }
-            if (intent.candidateCount < static_cast<int>(intent.candidates.size())) {
-                intent.candidates[static_cast<std::size_t>(intent.candidateCount++)] = c;
-            }
-        };
-
-        if (intent.hasMove) {
-            pushCandidate(intent.to);
-        } else {
-            pushCandidate(unit.pos);
-            return;
-        }
-
-        struct Candidate {
-            Coord pos;
-            float cost;
-            std::uint32_t tie;
-        };
-        std::vector<Candidate> options;
-        std::vector<Coord> nbrs;
-        map.getNeighbors(unit.pos, nbrs);
-        Coord clampedGoal = clampToMap(map, goal);
-        const int width = map.getWidth();
-
-        for (const auto& n : nbrs) {
-            if (!map.inBounds(n)) continue;
-            if (!map.getTile(n).isPassable()) continue;
-            if (n != unit.pos && occ.find(packCoord(n)) != occ.end()) continue;
-            if (intent.hasMove && n == intent.to) continue;
-            float cost = map.getTile(n).getMoveCost();
-            cost += static_cast<float>(n.mhtDistanceTo(clampedGoal));
-            cost += kHeatAlpha * heatAt(heat, width, n);
-            options.push_back({n, cost, stableHash(unit.id, n)});
-        }
-
-        std::sort(options.begin(), options.end(),
-                  [](const Candidate& a, const Candidate& b) {
-                      if (std::abs(a.cost - b.cost) > 1e-4f) return a.cost < b.cost;
-                      return a.tie < b.tie;
-                  });
-
-        if (!options.empty()) {
-            pushCandidate(options.front().pos);
-        }
-
-        pushCandidate(unit.pos);
-    }
-
-    bool selectAttackPosition(const UnitSnapshot& self,
-                              const AttackableSnapshot& target,
-                              const Map& map,
-                              const std::vector<AttackableSnapshot>& enemies,
-                              const ReachableGrid& reachable,
-                              const std::unordered_set<std::uint64_t>& occ,
-                              int minDist,
-                              int maxDist,
-                              Coord& out) {
-        if (minDist > maxDist) return false;
-        bool found = false;
-        Coord bestPos{};
-        int bestMove = 0;
-        float bestThreat = 0.f;
-        int bestTargetDist = 0;
-
-        for (int dy = -maxDist; dy <= maxDist; ++dy) {
-            for (int dx = -maxDist; dx <= maxDist; ++dx) {
-                int manhattan = std::abs(dx) + std::abs(dy);
-                if (manhattan < minDist || manhattan > maxDist) continue;
-                Coord cand{target.pos.x + dx, target.pos.y + dy};
-                if (!map.inBounds(cand)) continue;
-                if (!map.getTile(cand).isPassable()) continue;
-                if (!reachable.isReachable(cand)) continue;
-                if (cand != self.pos && occ.find(packCoord(cand)) != occ.end()) continue;
-                if (!inAttackRangeFrom(self, map, target, cand)) continue;
-
-                int moveCost = self.pos.mhtDistanceTo(cand);
-                float threat = computeThreatAtCoord(cand, enemies, kThreatRadius);
-                int distToTarget = cand.mhtDistanceTo(target.pos);
-
-                bool better = false;
-                if (!found) {
-                    better = true;
-                } else if (moveCost != bestMove) {
-                    better = moveCost < bestMove;
-                } else if (std::abs(threat - bestThreat) > 1e-4f) {
-                    better = threat < bestThreat;
-                } else if (distToTarget != bestTargetDist) {
-                    better = distToTarget < bestTargetDist;
-                } else if (cand.y != bestPos.y) {
-                    better = cand.y < bestPos.y;
-                } else if (cand.x != bestPos.x) {
-                    better = cand.x < bestPos.x;
-                }
-
-                if (better) {
-                    bestPos = cand;
-                    bestMove = moveCost;
-                    bestThreat = threat;
-                    bestTargetDist = distToTarget;
-                    found = true;
-                }
-            }
-        }
-
-        if (!found) return false;
-        out = bestPos;
-        return true;
-    }
-
-    float computeThreatAtCoord(const Coord& pos,
-                               const std::vector<AttackableSnapshot>& enemies,
-                               float radius) {
-        float threat = 0.f;
-        for (const auto& e : enemies) {
-            if (e.isBase) continue;
-            if (pos.mhtDistanceTo(e.pos) <= radius) {
-                threat += threatScore(e);
-            }
-        }
-        return threat;
-    }
-
-    Coord chooseSafeSpot(const UnitSnapshot& self,
-                         const Map& map,
-                         const std::vector<AttackableSnapshot>& enemies,
-                         int sampleRadius) {
-        static const std::array<Coord, 12> offsets = {
-            Coord{0, -2}, Coord{2, 0}, Coord{0, 2}, Coord{-2, 0},
-            Coord{2, 2}, Coord{2, -2}, Coord{-2, 2}, Coord{-2, -2},
-            Coord{0, -4}, Coord{4, 0}, Coord{0, 4}, Coord{-4, 0}
-        };
-
-        Coord best = self.pos;
-        float bestThreat = 1e9f;
-        bool found = false;
-
-        for (const auto& off : offsets) {
-            Coord cand{self.pos.x + off.x, self.pos.y + off.y};
-            if (!map.inBounds(cand)) continue;
-            if (std::abs(off.x) > sampleRadius || std::abs(off.y) > sampleRadius) continue;
-            if (!map.getTile(cand).isPassable()) continue;
-            float threat = computeThreatAtCoord(cand, enemies, kThreatRadius);
-            if (!found || threat < bestThreat ||
-                (std::abs(threat - bestThreat) <= 1e-4f &&
-                 (cand.y < best.y || (cand.y == best.y && cand.x < best.x)))) {
-                best = cand;
-                bestThreat = threat;
-                found = true;
-            }
-        }
-
-        if (!found) return self.pos;
-        return best;
-    }
-
-    float computeLocalThreatWorld(const Unit& self,
-                                  const std::vector<std::shared_ptr<Unit>>& enemies,
-                                  float radius) {
-        float threat = 0.f;
-        for (const auto& e : enemies) {
-            if (!e || !e->isAlive()) continue;
-            if (self.getPos().mhtDistanceTo(e->getPos()) <= radius) {
-                threat += e->baseStats.attack * (0.6f + 0.12f * e->baseStats.attackRange);
-            }
-        }
-        return threat;
-    }
-
-    void rebuildPathState(const UnitSnapshot& unit,
-                          const Map& map,
-                          const Coord& target,
-                          IMovementBehavior::MovementState& state) {
-        state.path.clear();
-        map.findPathAStar(unit.pos, target, state.path);
-        state.idx = 0;
-        state.accumulator = 0.f;
-        state.lastTarget = target;
-        state.hasLast = true;
-    }
-
-    MoveIntent planMoveIntent(const UnitSnapshot& unit,
-                              float dt,
-                              const Map& map,
-                              const std::vector<AttackableSnapshot>& enemies,
-                              const std::unordered_map<AttackableKey, std::size_t, AttackableKeyHash>& enemyIndex,
-                              const std::vector<AttackableKey>& forcedKeys,
-                              const std::unordered_map<AttackableKey, float, AttackableKeyHash>& incomingDamage,
-                              const std::unordered_map<AttackableKey, int, AttackableKeyHash>& lockedCounts,
-                              const std::vector<UnitSnapshot>& allies,
-                              bool baseAlive,
-                              const Coord& basePos,
-                              const std::unordered_set<std::uint64_t>& occ) {
-        MoveIntent intent;
-        intent.unitId = unit.id;
-        intent.from = unit.pos;
-        intent.to = unit.pos;
-        intent.commandMove = unit.commandMoveActive;
-
-        std::vector<float> heat = buildHeatMap(map, allies, occ, unit.id);
-
-        IMovementBehavior::MovementState nextState = unit.movementState;
-        Coord desiredTarget = unit.pos;
-        bool hasDesiredTarget = false;
-        MoveReason reason = unit.moveReason;
-        bool retreating = unit.retreating;
-        float retreatTimer = unit.retreatTimer;
-        bool hasAnchor = unit.hasRetreatAnchor;
-        Coord anchor = unit.retreatAnchor;
-
-        if (unit.commandMoveActive) {
-            reason = MoveReason::Command;
-            Coord cmdTarget{};
-            bool hasCmdTarget = false;
-            if (!unit.movementState.path.empty()) {
-                cmdTarget = unit.movementState.path.back();
-                hasCmdTarget = true;
-            } else if (unit.movementState.hasLast) {
-                cmdTarget = unit.movementState.lastTarget;
-                hasCmdTarget = true;
-            }
-            if (hasCmdTarget) {
-                desiredTarget = applyAnchorSlot(map, occ, cmdTarget, unit.id, unit.pos);
-                hasDesiredTarget = true;
-            }
-        } else {
-            std::vector<const AttackableSnapshot*> visible =
-                collectVisibleEnemies(unit, map, enemies, enemyIndex, forcedKeys);
-            ReachableGrid reachable = buildReachableGrid(map, unit.pos);
-            TargetChoice choice = chooseTarget(unit, visible, allies,
-                                               incomingDamage, lockedCounts,
-                                               kTargetParams, map, reachable,
-                                               occ);
-            float localThreat = computeLocalThreat(unit, visible, kThreatRadius);
-            const AttackableSnapshot* target = choice.target;
-            if (unit.commandAttackActive && unit.commandTarget.id >= 0) {
-                auto it = enemyIndex.find(unit.commandTarget);
-                if (it != enemyIndex.end()) {
-                    target = &enemies[it->second];
-                    choice.baseOpportunity = target->isBase
-                        ? baseOpportunityScore(unit, *target, allies, visible,
-                                               kTargetParams, localThreat)
-                        : 0.f;
-                }
-            }
-            float dist = target ? unit.pos.mhtDistanceTo(target->pos) : 0.f;
-            float cdAfter = std::max(0.0f, unit.cooldown - dt);
-            bool inRange = target ? inAttackRange(unit, map, *target) : false;
-            CombatAction action = decideCombatAction(unit, target, dist, inRange, cdAfter,
-                                                     localThreat, choice.baseOpportunity,
-                                                     kActionParams);
-            float hpRatio = (unit.maxHp > 0.f) ? (unit.hp / unit.maxHp) : 1.0f;
-            bool enterRetreat = (hpRatio <= kRetreatParams.hpEnter);
-            bool exitRetreat = (hpRatio >= kRetreatParams.hpExit &&
-                                retreatTimer <= 0.f);
-
-            if (retreating) {
-                if (exitRetreat) {
-                    retreating = false;
-                    retreatTimer = 0.f;
-                    hasAnchor = false;
-                }
-            } else if (enterRetreat) {
-                retreating = true;
-                retreatTimer = kRetreatParams.retreatMinTime;
-                hasAnchor = false;
-            }
-
-            if (retreating) {
-                if (!hasAnchor) {
-                    if (baseAlive) {
-                        anchor = basePos;
-                        hasAnchor = true;
-                    } else {
-                        anchor = chooseSafeSpot(unit, map, enemies, kRetreatParams.sampleRadius);
-                        hasAnchor = true;
-                    }
-                }
-                anchor = nearestPassable(map, anchor, 2);
-                int distToAnchor = unit.pos.mhtDistanceTo(anchor);
-                if (distToAnchor > 0) {
-                    desiredTarget = applyAnchorSlot(map, occ, anchor, unit.id, unit.pos);
-                    hasDesiredTarget = true;
-                    reason = MoveReason::Retreat;
-                } else {
-                    nextState.path.clear();
-                    nextState.idx = 0;
-                    nextState.accumulator = 0.f;
-                    nextState.hasLast = false;
-                    reason = MoveReason::None;
-                }
-                if (distToAnchor > kRetreatParams.maxRetreatDist) {
-                    desiredTarget = applyAnchorSlot(map, occ, anchor, unit.id, unit.pos);
-                    hasDesiredTarget = true;
-                    reason = MoveReason::Retreat;
-                }
-            }
-
-            if (!retreating && action == CombatAction::Retreat && target) {
-                int steps = static_cast<int>(std::ceil(kActionParams.kiteExtraDist));
-                Coord awayGoal{unit.pos.x + (unit.pos.x - target->pos.x),
-                               unit.pos.y + (unit.pos.y - target->pos.y)};
-                desiredTarget = stepAlongManhattan(unit.pos, awayGoal, steps);
-                hasDesiredTarget = true;
-                reason = MoveReason::Retreat;
-            } else if (!retreating && action == CombatAction::Kite && target) {
-                int desiredDist = std::max(1, static_cast<int>(std::floor(
-                    unit.stats.attackRange - kActionParams.kiteMargin)));
-                Coord kitePos{};
-                if (selectAttackPosition(unit, *target, map, enemies, reachable, occ,
-                                         desiredDist, desiredDist + 1, kitePos)) {
-                    desiredTarget = kitePos;
-                } else {
-                    int steps = static_cast<int>(std::ceil(kActionParams.kiteExtraDist));
-                    Coord awayGoal{unit.pos.x + (unit.pos.x - target->pos.x),
-                                   unit.pos.y + (unit.pos.y - target->pos.y)};
-                    desiredTarget = stepAlongManhattan(unit.pos, awayGoal, steps);
-                }
-                hasDesiredTarget = true;
-                reason = MoveReason::Kite;
-            } else if (!retreating &&
-                       (action == CombatAction::Chase || action == CombatAction::Siege) && target) {
-                bool ranged = unit.stats.attackRange > 2.5f;
-                bool needMove = !inRange;
-                if (ranged) {
-                    int desiredDist = std::max(1, static_cast<int>(std::floor(
-                        unit.stats.attackRange - kActionParams.kiteMargin)));
-                    if (dist > desiredDist) {
-                        needMove = true;
-                    }
-                    if (needMove) {
-                        Coord firePos{};
-                        int minDist = std::max(1, desiredDist - 1);
-                        int maxDist = std::max(minDist, desiredDist + 1);
-                        if (selectAttackPosition(unit, *target, map, enemies, reachable, occ,
-                                                 minDist, maxDist, firePos)) {
-                            desiredTarget = firePos;
-                            hasDesiredTarget = true;
-                        } else {
-                            Coord anchorSlot = applyAnchorSlot(map, occ, target->pos, unit.id, unit.pos);
-                            desiredTarget = nearestReachableToTarget(map, reachable, anchorSlot);
-                            hasDesiredTarget = (desiredTarget != unit.pos);
-                        }
-                    }
-                } else {
-                    int meleeRange = std::max(1, static_cast<int>(std::floor(
-                        unit.stats.attackRange + 0.001f)));
-                    if (dist > meleeRange) {
-                        needMove = true;
-                    }
-                    if (needMove) {
-                        Coord meleePos{};
-                        if (selectAttackPosition(unit, *target, map, enemies, reachable, occ,
-                                                 1, meleeRange, meleePos)) {
-                            desiredTarget = meleePos;
-                            hasDesiredTarget = true;
-                        } else {
-                            Coord anchorSlot = applyAnchorSlot(map, occ, target->pos, unit.id, unit.pos);
-                            desiredTarget = nearestReachableToTarget(map, reachable, anchorSlot);
-                            hasDesiredTarget = (desiredTarget != unit.pos);
-                        }
-                    }
-                }
-                if (hasDesiredTarget) {
-                    reason = (action == CombatAction::Siege) ? MoveReason::Siege : MoveReason::Chase;
-                } else {
-                    nextState.path.clear();
-                    nextState.idx = 0;
-                    nextState.accumulator = 0.f;
-                    nextState.hasLast = false;
-                    reason = MoveReason::None;
-                }
-            }
-        }
-
-        if (hasDesiredTarget) {
-            desiredTarget = clampToMap(map, desiredTarget);
-            if (!nextState.hasLast || nextState.lastTarget != desiredTarget) {
-                rebuildPathStateHeat(unit, map, desiredTarget, heat, nextState);
-            }
-        }
-
-        if (nextState.path.empty() || nextState.idx >= nextState.path.size()) {
-            intent.nextState = std::move(nextState);
-            intent.setIdle = true;
-            intent.reason = MoveReason::None;
-            intent.retreating = retreating;
-            intent.retreatTimer = retreatTimer;
-            intent.retreatAnchor = anchor;
-            intent.hasRetreatAnchor = retreating && hasAnchor;
-            fillMoveCandidates(unit, map, desiredTarget, heat, occ, intent);
-            return intent;
-        }
-
-        Coord nextPos = unit.pos;
-        float sp = movementSpend(unit, map.getTile(unit.pos));
-        nextState.accumulator += sp * dt;
-
-        while (nextState.accumulator >= 1.0f && nextState.idx + 1 < nextState.path.size()) {
-            nextState.accumulator -= 1.f;
-            nextPos = nextState.path[++nextState.idx];
-        }
-
-        if (nextState.idx + 1 >= nextState.path.size()) {
-            nextState.path.clear();
-        }
-
-        intent.to = nextPos;
-        intent.hasMove = (nextPos != intent.from);
-        intent.setIdle = nextState.path.empty();
-        intent.reason = intent.setIdle ? MoveReason::None : reason;
-        intent.retreating = retreating;
-        intent.retreatTimer = retreatTimer;
-        intent.retreatAnchor = anchor;
-        intent.hasRetreatAnchor = retreating && hasAnchor;
-        fillMoveCandidates(unit, map, desiredTarget, heat, occ, intent);
-        intent.nextState = std::move(nextState);
-        return intent;
-    }
-} 
+    baseA = a;
+    baseB = b;
+    return true;
+}
 
 WorldState::WorldState(int width, int height)
     : map(width, height) {}
@@ -1353,6 +109,17 @@ void WorldEventBus::drain(WorldControlContext& control, WorldRuntimeContext& run
 WorldRuntime::WorldRuntime()
     : taskPool(4) {}
 
+void WorldRuntime::enqueueUiEvent(std::optional<std::string> input,
+                                  std::optional<std::string> feedback) {
+    UiEvent evt;
+    evt.input = std::move(input);
+    evt.feedback = std::move(feedback);
+    {
+        std::lock_guard<std::mutex> lock(uiEventMutex);
+        uiEvents.push(std::move(evt));
+    }
+}
+
 WorldDataContext::WorldDataContext(WorldState& state)
     : map(state.map),
       baseA(state.baseA),
@@ -1373,7 +140,8 @@ WorldDataContext::WorldDataContext(WorldState& state)
       nextBaseId(state.nextBaseId) {}
 
 WorldRuntimeContext::WorldRuntimeContext(WorldRuntime& runtime)
-    : taskPool(runtime.taskPool),
+    : runtime(runtime),
+      taskPool(runtime.taskPool),
       renderThread(runtime.renderThread),
       renderRunning(runtime.renderRunning),
       paused(runtime.paused),
@@ -1395,99 +163,6 @@ WorldControlContext::WorldControlContext(ControlState& control)
       awaitingProductionChoice(control.awaitingProductionChoice),
       productionChoiceBase(control.productionChoiceBase),
       productionInputBuffer(control.productionInputBuffer) {}
-
-const AiScoring::TargetScoreParams AiScoring::kTargetParams{};
-const AiScoring::ActionParams AiScoring::kActionParams{};
-const AiScoring::RetreatParams AiScoring::kRetreatParams{};
-const AiScoring::OocParams AiScoring::kOocParams{};
-
-namespace {
-    void enqueueUi(WorldRuntimeContext& runtime,
-                   const std::string& input,
-                   const std::string& feedback) {
-        runtime.enqueueUiEvent(std::optional<std::string>(input),
-                               std::optional<std::string>(feedback));
-    }
-
-    void enqueueUiInput(WorldRuntimeContext& runtime,
-                        const std::string& input) {
-        runtime.enqueueUiEvent(std::optional<std::string>(input), std::nullopt);
-    }
-
-    void enqueueRuntimeUi(WorldRuntime& runtime,
-                          std::optional<std::string> input,
-                          std::optional<std::string> feedback) {
-        WorldRuntime::UiEvent evt;
-        evt.input = std::move(input);
-        evt.feedback = std::move(feedback);
-        {
-            std::lock_guard<std::mutex> lock(runtime.uiEventMutex);
-            runtime.uiEvents.push(std::move(evt));
-        }
-    }
-
-    struct InputCommand {
-        virtual ~InputCommand() = default;
-        virtual void execute(WorldDataContext& data,
-                             WorldControlContext& control,
-                             WorldRuntimeContext& runtime) = 0;
-    };
-
-    struct MoveCommand final : InputCommand {
-        Coord dest{};
-        explicit MoveCommand(const Coord& d) : dest(d) {}
-
-        void execute(WorldDataContext& data,
-                     WorldControlContext& control,
-                     WorldRuntimeContext& runtime) override {
-            for (int id : control.selectedUnitIds) {
-                auto u = data.findUnit(id);
-                if (u) u->issueMove(dest);
-            }
-            enqueueUi(runtime, "click move",
-                      "Move to " + std::to_string(dest.x) + "," + std::to_string(dest.y));
-        }
-    };
-
-    struct AttackCommand final : InputCommand {
-        std::shared_ptr<IAttackable> target;
-        explicit AttackCommand(std::shared_ptr<IAttackable> t) : target(std::move(t)) {}
-
-        void execute(WorldDataContext& data,
-                     WorldControlContext& control,
-                     WorldRuntimeContext& runtime) override {
-            if (!target) return;
-            for (int id : control.selectedUnitIds) {
-                auto u = data.findUnit(id);
-                if (u) u->issueAttackTarget(target);
-            }
-            enqueueUi(runtime, "click attack", "Attack target set");
-        }
-    };
-
-    struct CancelCommand final : InputCommand {
-        void execute(WorldDataContext&,
-                     WorldControlContext& control,
-                     WorldRuntimeContext& runtime) override {
-            control.cancelTargeting();
-            runtime.resume();
-        }
-    };
-
-    struct SelectCommand final : InputCommand {
-        int unitId = -1;
-        explicit SelectCommand(int id) : unitId(id) {}
-
-        void execute(WorldDataContext&,
-                     WorldControlContext& control,
-                     WorldRuntimeContext& runtime) override {
-            if (unitId < 0) return;
-            control.setSelection({unitId});
-            enqueueUi(runtime, "click select",
-                      "Selected #" + std::to_string(unitId));
-        }
-    };
-}
 
 // State + Command anchor: UI state controls input routing; commands execute on commit.
 struct InputStateMachine {
@@ -1525,6 +200,68 @@ struct InputStateMachine {
     }
 
 private:
+    struct InputCommand {
+        virtual ~InputCommand() = default;
+        virtual void execute(WorldDataContext& data,
+                             WorldControlContext& control,
+                             WorldRuntimeContext& runtime) = 0;
+    };
+
+    struct MoveCommand final : InputCommand {
+        Coord dest{};
+        explicit MoveCommand(const Coord& d) : dest(d) {}
+
+        void execute(WorldDataContext& data,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            for (int id : control.selectedUnitIds) {
+                auto u = data.findUnit(id);
+                if (u) u->issueMove(dest);
+            }
+            postUi(runtime, "click move",
+                   "Move to " + std::to_string(dest.x) + "," + std::to_string(dest.y));
+        }
+    };
+
+    struct AttackCommand final : InputCommand {
+        std::shared_ptr<IAttackable> target;
+        explicit AttackCommand(std::shared_ptr<IAttackable> t) : target(std::move(t)) {}
+
+        void execute(WorldDataContext& data,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            if (!target) return;
+            for (int id : control.selectedUnitIds) {
+                auto u = data.findUnit(id);
+                if (u) u->issueAttackTarget(target);
+            }
+            postUi(runtime, "click attack", "Attack target set");
+        }
+    };
+
+    struct CancelCommand final : InputCommand {
+        void execute(WorldDataContext&,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            control.cancelTargeting();
+            runtime.resume();
+        }
+    };
+
+    struct SelectCommand final : InputCommand {
+        int unitId = -1;
+        explicit SelectCommand(int id) : unitId(id) {}
+
+        void execute(WorldDataContext&,
+                     WorldControlContext& control,
+                     WorldRuntimeContext& runtime) override {
+            if (unitId < 0) return;
+            control.setSelection({unitId});
+            postUi(runtime, "click select",
+                   "Selected #" + std::to_string(unitId));
+        }
+    };
+
     UiState state() const {
         if (control.awaitingProductionChoice) return UiState::Production;
         if (control.controlMode == ControlState::ControlMode::Targeting) {
@@ -1542,7 +279,7 @@ private:
             }
             if (key.code == Key::P) {
                 control.cancelProductionChoice(runtime);
-                enqueueUiInput(runtime, "production cancel (P)");
+                postUiInput(runtime, "production cancel (P)");
                 return;
             }
             if (key.code == Key::Enter) {
@@ -1572,7 +309,7 @@ private:
             if (render.inputActive) {
                 if (!render.inputBuffer.empty()) {
                     control.enqueueCommand(render.inputBuffer);
-                    enqueueUiInput(runtime, render.inputBuffer);
+                    postUiInput(runtime, render.inputBuffer);
                 }
                 render.inputBuffer.clear();
                 render.inputActive = false;
@@ -1599,8 +336,8 @@ private:
             runtime.requestQuit();
         } else if (key.code == Key::P) {
             runtime.togglePause();
-            enqueueUi(runtime, "toggle pause",
-                      runtime.paused.load() ? "Paused" : "Resumed");
+            postUi(runtime, "toggle pause",
+                   runtime.paused.load() ? "Paused" : "Resumed");
         }
     }
 
@@ -1629,8 +366,8 @@ private:
 
         if (mouse.button == sf::Mouse::Button::Middle) {
             runtime.togglePause();
-            enqueueUi(runtime, "mouse pause",
-                      runtime.paused.load() ? "Paused" : "Resumed");
+            postUi(runtime, "mouse pause",
+                   runtime.paused.load() ? "Paused" : "Resumed");
             return;
         }
 
@@ -1777,6 +514,18 @@ private:
     void enterTargeting() {
         control.enterTargeting();
         runtime.pause();
+    }
+
+    static void postUi(WorldRuntimeContext& runtime,
+                       const std::string& input,
+                       const std::string& feedback) {
+        runtime.enqueueUiEvent(std::optional<std::string>(input),
+                               std::optional<std::string>(feedback));
+    }
+
+    static void postUiInput(WorldRuntimeContext& runtime,
+                            const std::string& input) {
+        runtime.enqueueUiEvent(std::optional<std::string>(input), std::nullopt);
     }
 
     std::optional<Faction> selectedFaction() const {
@@ -1944,7 +693,7 @@ GameWorld::GameWorld()
     while (!ok) {
         Map candidate = gen.generate();
 
-        if (pickBasePositions(candidate, baseAPos, baseBPos)) {
+        if (MapPlacement::pickBasePositions(candidate, baseAPos, baseBPos)) {
             state.map = std::move(candidate);
             ok = true;
         }
@@ -1967,12 +716,12 @@ GameWorld::GameWorld()
         if (!runtimePtr) return;
         if (evt.type == WorldEventType::BaseDestroyed) {
             const char* baseLabel = (evt.faction == Faction::A) ? "A" : "B";
-            enqueueRuntimeUi(*runtimePtr, std::nullopt,
-                             std::string("Base ") + baseLabel + " destroyed");
+            runtimePtr->enqueueUiEvent(std::nullopt,
+                                       std::string("Base ") + baseLabel + " destroyed");
         } else if (evt.type == WorldEventType::GameEnded) {
             const char* winner = (evt.faction == Faction::A) ? "A" : "B";
-            enqueueRuntimeUi(*runtimePtr, std::nullopt,
-                             std::string("Winner: ") + winner);
+            runtimePtr->enqueueUiEvent(std::nullopt,
+                                       std::string("Winner: ") + winner);
         }
     });
 }
@@ -2052,8 +801,8 @@ void GameWorld::update(float dt) {
         occSnap.reserve(state.unitsA.size() + state.unitsB.size() + 2);
         buildUnitSnapshots(state.unitsA, unitsASnap, &occSnap);
         buildUnitSnapshots(state.unitsB, unitsBSnap, &occSnap);
-        if (baseAAlive) occSnap.insert(packCoord(baseAPos));
-        if (baseBAlive) occSnap.insert(packCoord(baseBPos));
+        if (baseAAlive) occSnap.insert(Coord::packCoord(baseAPos));
+        if (baseBAlive) occSnap.insert(Coord::packCoord(baseBPos));
 
         buildEnemySnapshots(state.unitsB, state.baseB, enemiesASnap);
         buildEnemySnapshots(state.unitsA, state.baseA, enemiesBSnap);
@@ -2100,8 +849,8 @@ void GameWorld::update(float dt) {
         if (unit.hp <= 0.f) return;
         runtimeCtx.taskPool.submit([&, unit]() {
             std::vector<const AttackableSnapshot*> visible =
-                collectVisibleEnemies(unit, state.map, enemies, enemyIndex, forcedKeys);
-            ReachableGrid reachable = buildReachableGrid(state.map, unit.pos);
+                AiTargetScoring::collectVisibleEnemies(unit, state.map, enemies, enemyIndex, forcedKeys);
+            ReachableGrid reachable = MapQuery::buildReachableGrid(state.map, unit.pos);
 
             VisionIntent visionIntent;
             visionIntent.unitId = unit.id;
@@ -2112,9 +861,9 @@ void GameWorld::update(float dt) {
 
             TargetHint hint;
             hint.unitId = unit.id;
-            TargetChoice choice = chooseTarget(unit, visible, allies,
+            TargetChoice choice = AiTargetScoring::chooseTarget(unit, visible, allies,
                                                incomingDamage, lockedCounts,
-                                               kTargetParams, state.map, reachable,
+                                               AiScoring::kTargetParams, state.map, reachable,
                                                occ);
             hint.targetId = choice.target ? choice.target->key.id : -1;
 
@@ -2177,7 +926,7 @@ void GameWorld::update(float dt) {
                             const std::unordered_set<std::uint64_t>& occ) {
         if (unit.hp <= 0.f) return;
         runtimeCtx.taskPool.submit([&, unit]() {
-            MoveIntent intent = planMoveIntent(unit, dt, state.map, enemies, enemyIndex,
+            MoveIntent intent = MovementPlanner::planMoveIntent(unit, dt, state.map, enemies, enemyIndex,
                                                forcedKeys, incomingDamage,
                                                lockedCounts, allies,
                                                baseAlive, basePos, occ);
@@ -2299,7 +1048,7 @@ void GameWorld::update(float dt) {
         std::unordered_set<std::uint64_t> occ;
         occ.reserve(state.unitsA.size() + state.unitsB.size() + 4);
         auto occupyIf = [&](bool ok, const Coord& c) {
-            if (ok) occ.insert(packCoord(c));
+            if (ok) occ.insert(Coord::packCoord(c));
         };
         occupyIf(state.baseA && !state.baseA->isDestroyed(), state.baseA->getPos());
         occupyIf(state.baseB && !state.baseB->isDestroyed(), state.baseB->getPos());
@@ -2321,15 +1070,15 @@ void GameWorld::update(float dt) {
                 Coord cand = intent.candidates[static_cast<std::size_t>(i)];
                 if (!state.map.inBounds(cand)) continue;
                 if (!state.map.getTile(cand).isPassable()) continue;
-                if (cand != from && occ.find(packCoord(cand)) != occ.end()) continue;
+                if (cand != from && occ.find(Coord::packCoord(cand)) != occ.end()) continue;
                 chosen = cand;
                 hasChoice = true;
                 break;
             }
             if (!hasChoice || chosen == from) continue;
 
-            auto kPrev = packCoord(from);
-            auto kNow = packCoord(chosen);
+            auto kPrev = Coord::packCoord(from);
+            auto kNow = Coord::packCoord(chosen);
             occ.erase(kPrev);
             if (occ.find(kNow) != occ.end()) {
                 occ.insert(kPrev);
@@ -2364,8 +1113,8 @@ void GameWorld::update(float dt) {
         occAtk.reserve(state.unitsA.size() + state.unitsB.size() + 2);
         buildUnitSnapshots(state.unitsA, unitsASnapAtk, &occAtk);
         buildUnitSnapshots(state.unitsB, unitsBSnapAtk, &occAtk);
-        if (state.baseA && !state.baseA->isDestroyed()) occAtk.insert(packCoord(state.baseA->pos));
-        if (state.baseB && !state.baseB->isDestroyed()) occAtk.insert(packCoord(state.baseB->pos));
+        if (state.baseA && !state.baseA->isDestroyed()) occAtk.insert(Coord::packCoord(state.baseA->pos));
+        if (state.baseB && !state.baseB->isDestroyed()) occAtk.insert(Coord::packCoord(state.baseB->pos));
         buildEnemySnapshots(state.unitsB, state.baseB, enemiesASnapAtk);
         buildEnemySnapshots(state.unitsA, state.baseA, enemiesBSnapAtk);
     }
@@ -2391,7 +1140,7 @@ void GameWorld::update(float dt) {
                               const std::unordered_set<std::uint64_t>& occ) {
         if (unit.hp <= 0.f) return;
         runtimeCtx.taskPool.submit([&, unit]() {
-            AttackIntent intent = planAttackIntent(unit, dt, state.map, enemies,
+            AttackIntent intent = CombatPlanner::planAttackIntent(unit, dt, state.map, enemies,
                                                    enemyIndex, forcedKeys,
                                                    incomingDamage, lockedCounts,
                                                    allies, occ);
@@ -2641,12 +1390,12 @@ void GameWorld::update(float dt) {
                 u->behavior->timeSinceDealtDamage = 0.f;
             }
 
-            if (u->behavior->timeSinceDamaged > kOocParams.delay &&
-                u->behavior->timeSinceDealtDamage > kOocParams.delay) {
+            if (u->behavior->timeSinceDamaged > AiScoring::kOocParams.delay &&
+                u->behavior->timeSinceDealtDamage > AiScoring::kOocParams.delay) {
                 const auto& enemyUnits = (u->getFaction() == Faction::A) ? state.unitsB : state.unitsA;
-                float threat = computeLocalThreatWorld(*u, enemyUnits, kThreatRadius);
-                if (threat < kOocParams.threatThreshold) {
-                    float regen = u->baseStats.maxHP * kOocParams.regenRate * dt;
+                float threat = AiTargetScoring::computeLocalThreatWorld(*u, enemyUnits, AiScoring::kThreatRadius);
+                if (threat < AiScoring::kOocParams.threatThreshold) {
+                    float regen = u->baseStats.maxHP * AiScoring::kOocParams.regenRate * dt;
                     u->hp = std::min(u->baseStats.maxHP, u->hp + regen);
                 }
             }
@@ -2689,7 +1438,7 @@ void GameWorld::appendUnitSnapshot(
     if (u->behavior) {
         if (auto* attack = u->behavior->getAttackBehavior()) {
             snap.cooldown = attack->getCooldown();
-            snap.currentTarget = attackableKey(attack->getTarget().lock());
+            snap.currentTarget = AttackableKey::from(attack->getTarget().lock());
         }
 
         snap.commitTimer = u->behavior->commitTimer;
@@ -2719,7 +1468,7 @@ void GameWorld::appendUnitSnapshot(
     }
 
     out.push_back(std::move(snap));
-    if (occ) occ->insert(packCoord(u->pos));
+    if (occ) occ->insert(Coord::packCoord(u->pos));
 }
 
 void GameWorld::buildUnitSnapshots(
@@ -2787,7 +1536,7 @@ void GameWorld::buildForcedKeys(
     for (const auto& r : forced) {
         auto target = r.target.lock();
         if (!target) continue;
-        out.push_back(attackableKey(target));
+        out.push_back(AttackableKey::from(target));
     }
 }
 
@@ -2961,13 +1710,7 @@ long long WorldRuntimeContext::gameEndMs() const {
 
 void WorldRuntimeContext::enqueueUiEvent(std::optional<std::string> input,
                                          std::optional<std::string> feedback) {
-    WorldRuntime::UiEvent evt;
-    evt.input = std::move(input);
-    evt.feedback = std::move(feedback);
-    {
-        std::lock_guard<std::mutex> lock(uiEventMutex);
-        uiEvents.push(std::move(evt));
-    }
+    runtime.enqueueUiEvent(std::move(input), std::move(feedback));
 }
 
 void WorldRuntimeContext::drainUiEvents(WorldControlContext& control) {

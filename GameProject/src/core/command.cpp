@@ -5,56 +5,56 @@
  #include <cctype>
  #include <sstream>
 
- namespace {
-     std::string toLower(std::string s) {
-         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-             return static_cast<char>(std::tolower(c));
-         });
-         return s;
-     }
+struct CommandParser {
+    static std::string toLower(std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return s;
+    }
 
-     bool parseInt(const std::string& token, int& out) {
-         try {
-             size_t idx = 0;
-             int v = std::stoi(token, &idx);
-             if (idx != token.size()) return false;
-             out = v;
-             return true;
-         } catch (...) {
-             return false;
-         }
-     }
+    static bool parseInt(const std::string& token, int& out) {
+        try {
+            size_t idx = 0;
+            int v = std::stoi(token, &idx);
+            if (idx != token.size()) return false;
+            out = v;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 
-     bool parseUnitTypeToken(const std::string& token, UnitType& out) {
-         const std::string t = toLower(token);
-         if (t == "infantry" || t == "i") {
-             out = UnitType::Infantry;
-             return true;
-         }
-         if (t == "archer" || t == "a") {
-             out = UnitType::Archer;
-             return true;
-         }
-         if (t == "knight" || t == "k") {
-             out = UnitType::Knight;
-             return true;
-         }
-         return false;
-     }
+    static bool parseUnitTypeToken(const std::string& token, UnitType& out) {
+        const std::string t = toLower(token);
+        if (t == "infantry" || t == "i") {
+            out = UnitType::Infantry;
+            return true;
+        }
+        if (t == "archer" || t == "a") {
+            out = UnitType::Archer;
+            return true;
+        }
+        if (t == "knight" || t == "k") {
+            out = UnitType::Knight;
+            return true;
+        }
+        return false;
+    }
 
-     bool parseFactionToken(const std::string& token, Faction& out) {
-         const std::string t = toLower(token);
-         if (t == "a" || t == "factiona" || t == "basea") {
-             out = Faction::A;
-             return true;
-         }
-         if (t == "b" || t == "factionb" || t == "baseb") {
-             out = Faction::B;
-             return true;
-         }
-         return false;
-     }
- }
+    static bool parseFactionToken(const std::string& token, Faction& out) {
+        const std::string t = toLower(token);
+        if (t == "a" || t == "factiona" || t == "basea") {
+            out = Faction::A;
+            return true;
+        }
+        if (t == "b" || t == "factionb" || t == "baseb") {
+            out = Faction::B;
+            return true;
+        }
+        return false;
+    }
+};
 
  void CommandQueue::push(const std::string& line) {
      std::lock_guard<std::mutex> lock(mtx);
@@ -78,7 +78,7 @@
          return false;
      }
 
-     cmdToken = toLower(cmdToken);
+    cmdToken = CommandParser::toLower(cmdToken);
 
      if (cmdToken == "produce" || cmdToken == "p") {
          std::string who;
@@ -89,27 +89,27 @@
          }
          out = Command{};
          out.type = CommandType::Produce;
-         if (!parseFactionToken(who, out.baseFaction)) {
-             if (!parseInt(who, out.baseId)) {
-                 err = "unknown base target";
-                 return false;
-             }
-         }
-         if (!parseUnitTypeToken(typeToken, out.produceType)) {
-             err = "unknown unit type";
-             return false;
-         }
-         return true;
+        if (!CommandParser::parseFactionToken(who, out.baseFaction)) {
+            if (!CommandParser::parseInt(who, out.baseId)) {
+                err = "unknown base target";
+                return false;
+            }
+        }
+        if (!CommandParser::parseUnitTypeToken(typeToken, out.produceType)) {
+            err = "unknown unit type";
+            return false;
+        }
+        return true;
      }
 
      if (cmdToken == "move" || cmdToken == "m") {
          int id = -1;
          int x = 0, y = 0;
          std::string idToken;
-         if (!(iss >> idToken >> x >> y) || !parseInt(idToken, id)) {
-             err = "usage: move <unitId> <x> <y>";
-             return false;
-         }
+        if (!(iss >> idToken >> x >> y) || !CommandParser::parseInt(idToken, id)) {
+            err = "usage: move <unitId> <x> <y>";
+            return false;
+        }
          out = Command{};
          out.type = CommandType::Move;
          out.unitId = id;
@@ -130,27 +130,27 @@
          out.unitId = attackerId;
 
          Faction fac;
-         if (parseFactionToken(targetToken, fac)) {
-             out.targetIsBase = true;
-             out.baseFaction = fac;
-             return true;
-         }
-         int tid = -1;
-         if (!parseInt(targetToken, tid)) {
-             err = "invalid target id";
-             return false;
-         }
-         out.targetId = tid;
-         return true;
+        if (CommandParser::parseFactionToken(targetToken, fac)) {
+            out.targetIsBase = true;
+            out.baseFaction = fac;
+            return true;
+        }
+        int tid = -1;
+        if (!CommandParser::parseInt(targetToken, tid)) {
+            err = "invalid target id";
+            return false;
+        }
+        out.targetId = tid;
+        return true;
      }
 
      if (cmdToken == "stop" || cmdToken == "s") {
          int id = -1;
          std::string idToken;
-         if (!(iss >> idToken) || !parseInt(idToken, id)) {
-             err = "usage: stop <unitId>";
-             return false;
-         }
+        if (!(iss >> idToken) || !CommandParser::parseInt(idToken, id)) {
+            err = "usage: stop <unitId>";
+            return false;
+        }
          out = Command{};
          out.type = CommandType::Stop;
          out.unitId = id;
@@ -160,10 +160,10 @@
      if (cmdToken == "select") {
          int id = -1;
          std::string idToken;
-         if (!(iss >> idToken) || !parseInt(idToken, id)) {
-             err = "usage: select <unitId>";
-             return false;
-         }
+        if (!(iss >> idToken) || !CommandParser::parseInt(idToken, id)) {
+            err = "usage: select <unitId>";
+            return false;
+        }
          out = Command{};
          out.type = CommandType::Select;
          out.unitId = id;

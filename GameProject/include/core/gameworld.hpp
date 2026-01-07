@@ -52,6 +52,9 @@ private:
     std::atomic<bool> alive{true};
     std::mutex mutex;
     std::condition_variable cv;
+#ifndef NDEBUG
+    static void debugAbort(const char* msg, const TaskGroup* group, int value);
+#endif
 
 public:
     ~TaskGroup();
@@ -130,54 +133,6 @@ struct TargetHint {
     int targetId = -1;
 };
 
-struct AttackableKey {
-    int id = -1;
-    AttackableType type = AttackableType::UNIT;
-
-    bool operator==(const AttackableKey& other) const {
-        return id == other.id && type == other.type;
-    }
-};
-
-struct AttackableKeyHash {
-    std::size_t operator()(const AttackableKey& key) const {
-        std::size_t h1 = std::hash<int>{}(key.id);
-        std::size_t h2 = std::hash<int>{}(static_cast<int>(key.type));
-        return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6) + (h1 >> 2));
-    }
-};
-
-struct MoveIntent {
-    int unitId = -1;
-    Coord from{};
-    Coord to{};
-    bool hasMove = false;
-    bool commandMove = false;
-    bool setIdle = false;
-    MoveReason reason = MoveReason::None;
-    std::array<Coord, 3> candidates{};
-    int candidateCount = 0;
-    bool retreating = false;
-    float retreatTimer = 0.f;
-    Coord retreatAnchor{};
-    bool hasRetreatAnchor = false;
-    IMovementBehavior::MovementState nextState;
-};
-
-struct AttackIntent {
-    int attackerId = -1;
-    int targetId = -1;
-    AttackableType targetType = AttackableType::UNIT;
-    float damage = 0.f;
-    int nextTargetId = -1;
-    AttackableType nextTargetType = AttackableType::UNIT;
-    float nextCooldown = 0.f;
-    float nextCommitTimer = 0.f;
-    int nextCommitTargetId = -1;
-    AttackableType nextCommitTargetType = AttackableType::UNIT;
-    CombatAction action = CombatAction::None;
-    bool didAttack = false;
-};
 
 struct ProduceIntent {
     int baseId = -1;
@@ -199,123 +154,6 @@ struct IntentBuffer {
         attackIntents.clear();
         produceIntents.clear();
     }
-};
-
-struct AiScoring {
-    struct UnitSnapshot {
-        int id = -1;
-        UnitType type = UnitType::Infantry;
-        Faction faction = Faction::A;
-        Coord pos{};
-        float hp = 0.f;
-        float maxHp = 0.f;
-        UnitStats stats{};
-        float cooldown = 0.f;
-        AttackableKey currentTarget{};
-        float commitTimer = 0.f;
-        AttackableKey commitTarget{};
-        bool commandAttackActive = false;
-        AttackableKey commandTarget{};
-        bool retreating = false;
-        float retreatTimer = 0.f;
-        Coord retreatAnchor{};
-        bool hasRetreatAnchor = false;
-        float timeSinceDamaged = 0.f;
-        float timeSinceDealtDamage = 0.f;
-        bool commandMoveActive = false;
-        LocomotionState locomotionState = LocomotionState::Idle;
-        CombatState combatState = CombatState::None;
-        MoveReason moveReason = MoveReason::None;
-        IMovementBehavior::MovementState movementState;
-    };
-
-    struct AttackableSnapshot {
-        AttackableKey key{};
-        AttackableType type = AttackableType::UNIT;
-        Faction faction = Faction::A;
-        UnitType unitType = UnitType::Infantry;
-        Coord pos{};
-        float hp = 0.f;
-        float maxHp = 0.f;
-        float attack = 0.f;
-        float attackRange = 0.f;
-        float armor = 0.f;
-        bool isBase = false;
-    };
-
-    struct TargetScoreParams {
-        float distanceWeight = 1.2f;
-        float threatWeight = 1.0f;
-        float ttkWeight = 1.4f;
-        float executeWeight = 0.9f;
-        float preferenceWeight = 1.2f;
-        float overkillWeight = 1.1f;
-        float lockWeight = 0.6f;
-        float baseWeight = 0.8f;
-        float baseThreatPenalty = 1.2f;
-        float baseFinishBonus = 0.7f;
-        float commitBonus = 0.8f;
-        float commitDuration = 0.6f;
-        float retreatHpFrac = 0.35f;
-        float threatRetreat = 32.f;
-        float kiteRangeMargin = 0.8f;
-        float kiteExtraDist = 1.5f;
-        float siegeOpportunity = 1.25f;
-        float siegeHoldTime = 0.8f;
-        float losPenalty = 1.2f;
-        float unreachablePenalty = 1.8f;
-        float availabilityWeight = 0.9f;
-        int availabilityCap = 8;
-    };
-
-    struct ActionParams {
-        float retreatHpFrac = 0.35f;
-        float threatRetreat = 32.f;
-        float kiteMargin = 0.8f;
-        float kiteExtraDist = 1.5f;
-        float siegeOpportunity = 1.25f;
-    };
-
-    struct RetreatParams {
-        float hpEnter = 0.35f;
-        float hpExit = 0.55f;
-        float threatEnter = 32.f;
-        float threatExit = 22.f;
-        float retreatMinTime = 0.8f;
-        int maxRetreatDist = 12;
-        int sampleRadius = 6;
-        float retreatFireThreat = 24.f;
-    };
-
-    struct OocParams {
-        float delay = 2.0f;
-        float regenRate = 0.08f;
-        float threatThreshold = 12.f;
-    };
-
-    struct ReachableGrid {
-        int width = 0;
-        int height = 0;
-        std::vector<std::uint8_t> reachable;
-
-        bool isReachable(const Coord& c) const {
-            if (c.x < 0 || c.x >= width || c.y < 0 || c.y >= height) return false;
-            std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
-            return reachable[idx] != 0;
-        }
-    };
-
-    struct TargetChoice {
-        const AttackableSnapshot* target = nullptr;
-        float score = -1e30f;
-        float baseOpportunity = 0.f;
-    };
-
-    static const TargetScoreParams kTargetParams;
-    static const ActionParams kActionParams;
-    static const RetreatParams kRetreatParams;
-    static const OocParams kOocParams;
-    static constexpr float kThreatRadius = 6.0f;
 };
 
 class BaseSystem {
@@ -536,6 +374,8 @@ struct WorldRuntime {
     WorldEventBus eventBus;
 
     WorldRuntime();
+    void enqueueUiEvent(std::optional<std::string> input,
+                        std::optional<std::string> feedback);
 };
 
 struct ControlState {
@@ -605,6 +445,7 @@ struct WorldDataContext {
 };
 
 struct WorldRuntimeContext {
+    WorldRuntime& runtime;
     TaskPool& taskPool;
     std::thread& renderThread;
     std::atomic<bool>& renderRunning;

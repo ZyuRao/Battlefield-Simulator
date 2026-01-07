@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 
 struct Coord {
@@ -40,6 +41,24 @@ struct Coord {
 
     static int distance(const Coord& a, const Coord& b) {
         return a.distanceTo(b);
+    }
+
+    static std::uint64_t packCoord(const Coord& c) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
+    }
+
+    static Coord unpackCoord(std::uint64_t v) {
+        int x = static_cast<int>(static_cast<std::uint32_t>(v >> 32));
+        int y = static_cast<int>(static_cast<std::uint32_t>(v & 0xffffffffu));
+        return Coord{x, y};
+    }
+
+    static std::uint32_t stableHash(int unitId, const Coord& c) {
+        std::uint32_t h = static_cast<std::uint32_t>(unitId) * 2654435761u;
+        h ^= static_cast<std::uint32_t>(c.x) * 2246822519u;
+        h ^= static_cast<std::uint32_t>(c.y) * 3266489917u;
+        return h;
     }
 
     friend std::ostream& operator<<(std::ostream& os, const Coord& v) {

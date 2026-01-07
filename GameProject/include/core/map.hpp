@@ -4,6 +4,7 @@
 #include <queue>
 #include <algorithm>
 #include <random>
+#include <cstdint>
 #include "tile.hpp"
 #include "utils/vec2.hpp"
 
@@ -39,6 +40,76 @@ public:
 
     // void print() const;
 
+};
+
+struct UnitStats;
+
+struct MapQuery {
+    struct ReachableGrid {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> reachable;
+
+        bool isReachable(const Coord& c) const {
+            if (c.x < 0 || c.x >= width || c.y < 0 || c.y >= height) return false;
+            std::size_t idx = static_cast<std::size_t>(c.y) * width + c.x;
+            return reachable[idx] != 0;
+        }
+    };
+
+    static Coord clampToMap(const Map& map, Coord c);
+    static Coord nearestPassable(const Map& map, Coord c, int radius);
+    static ReachableGrid buildReachableGrid(const Map& map, const Coord& start);
+    static Coord nearestReachableToTarget(const Map& map,
+                                          const ReachableGrid& reachable,
+                                          const Coord& target);
+    static bool inAttackRange(const Map& map,
+                              const Coord& selfPos,
+                              const UnitStats& stats,
+                              const Coord& targetPos);
+    static bool inAttackRangeFrom(const Map& map,
+                                  const Coord& from,
+                                  const UnitStats& stats,
+                                  const Coord& targetPos);
+    static bool hasMountainBetween(const Map& map,
+                                   const Coord& start,
+                                   const Coord& goal);
+    static bool hasRiverBetween(const Map& map,
+                                const Coord& start,
+                                const Coord& goal);
+
+private:
+    static bool lineHasType(const Map& map,
+                            const Coord& start,
+                            const Coord& goal,
+                            TileType type);
+};
+
+struct PathPlanner {
+    static bool findPathAStarHeat(const Map& map,
+                                  const Coord& start,
+                                  const Coord& goal,
+                                  const std::vector<float>& heat,
+                                  int unitId,
+                                  std::vector<Coord>& outpath);
+    static void rebuildPathStateHeat(const Map& map,
+                                     const Coord& start,
+                                     const Coord& target,
+                                     const std::vector<float>& heat,
+                                     int unitId,
+                                     std::vector<Coord>& path,
+                                     std::size_t& idx,
+                                     float& accumulator,
+                                     Coord& lastTarget,
+                                     bool& hasLast);
+    static void rebuildPathState(const Map& map,
+                                 const Coord& start,
+                                 const Coord& target,
+                                 std::vector<Coord>& path,
+                                 std::size_t& idx,
+                                 float& accumulator,
+                                 Coord& lastTarget,
+                                 bool& hasLast);
 };
 
 class MapGenerator {

@@ -13,55 +13,20 @@
     #include <thread>
     #include <chrono>
 #endif
-namespace {
-    void clearScreen() {
-        #ifdef _WIN32
-            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (hOut == INVALID_HANDLE_VALUE) return;
-
-            CONSOLE_SCREEN_BUFFER_INFO csbi;
-            if (!GetConsoleScreenBufferInfo(hOut, &csbi)) return;
-
-            DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
-            DWORD count;
-            COORD home = {0, 0};
-
-            FillConsoleOutputCharacter(hOut, ' ', cellCount, home, &count);
-            FillConsoleOutputAttribute(hOut, csbi.wAttributes, cellCount, home, &count);
-            SetConsoleCursorPosition(hOut, home);
-        #else
-            std::cout << "\x1b[2J\x1b[H";
-        #endif
-    }
-
-    inline void sleep_ms(int ms) {
-    #ifdef _WIN32
-        Sleep(ms);
-    #else
-        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-    #endif
-    }
-
-    inline std::uint64_t packCoord(const Coord& c) {
-        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) << 32) |
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)));
-    }
-
 #ifndef NDEBUG
-    void debugAbort(const char* msg, const TaskGroup* group, int value) {
-        static std::atomic<bool> logged{false};
-        if (!logged.exchange(true, std::memory_order_relaxed)) {
-            std::fprintf(stderr,
-                         "[TaskGroup] %s group=%p remaining=%d\n",
-                         msg,
-                         static_cast<const void*>(group),
-                         value);
-            std::fflush(stderr);
-        }
-        std::abort();
+void TaskGroup::debugAbort(const char* msg, const TaskGroup* group, int value) {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+                     "[TaskGroup] %s group=%p remaining=%d\n",
+                     msg,
+                     static_cast<const void*>(group),
+                     value);
+        std::fflush(stderr);
     }
-#endif
+    std::abort();
 }
+#endif
 
 TimeManager::TimeManager()
     : deltatime(0.f), initialized(false) {}
@@ -100,7 +65,7 @@ TaskGroup::~TaskGroup() {
     alive.store(false, std::memory_order_release);
     int remaining = count.load(std::memory_order_acquire);
     if (remaining != 0) {
-        debugAbort("destroy with remaining tasks", this, remaining);
+        TaskGroup::debugAbort("destroy with remaining tasks", this, remaining);
     }
 #else
     alive.store(false, std::memory_order_release);
@@ -110,7 +75,7 @@ TaskGroup::~TaskGroup() {
 void TaskGroup::add(int n) {
 #ifndef NDEBUG
     if (!alive.load(std::memory_order_acquire)) {
-        debugAbort("add on dead group", this, count.load(std::memory_order_relaxed));
+        TaskGroup::debugAbort("add on dead group", this, count.load(std::memory_order_relaxed));
     }
 #endif
     if (n <= 0) return;
@@ -301,7 +266,7 @@ void MovementSystem::update(WorldDataContext& data, float dt)
     occ.reserve(data.unitsA.size() + data.unitsB.size() + 4);
 
     auto occupyIf = [&](bool ok, const Coord& c) {
-        if (ok) occ.insert(packCoord(c));
+        if (ok) occ.insert(Coord::packCoord(c));
     };
 
     // 先把基地、所有单位当前位置登记为“已占用”
@@ -321,8 +286,8 @@ void MovementSystem::update(WorldDataContext& data, float dt)
             Coord now = u->getPos();
             if (now == prev) continue;
 
-            const auto kPrev = packCoord(prev);
-            const auto kNow  = packCoord(now);
+            const auto kPrev = Coord::packCoord(prev);
+            const auto kNow  = Coord::packCoord(now);
 
             // 释放旧位置，再检查新位置是否被占
             occ.erase(kPrev);

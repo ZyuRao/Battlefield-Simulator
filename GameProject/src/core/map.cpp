@@ -1,8 +1,10 @@
 #include "core/map.hpp"
+#include "core/Iattackable.hpp"
 #include "external/FastNoiseLite.h"
 //https://github.com/Auburn/FastNoiseLite
 
 #include <cmath>
+#include <limits>
 
 
 //Map
@@ -180,8 +182,130 @@ void Map::findPathAStar (const Coord& start,const Coord& goal, std::vector<Coord
 
 
 
-namespace {
-bool lineHasType(const Map& map, const Coord& start, const Coord& goal, TileType type) {
+bool Map::hasMountainBetween(const Coord& start, const Coord& goal) const {
+    return MapQuery::hasMountainBetween(*this, start, goal);
+}
+
+bool Map::hasRiverBetween(const Coord& start, const Coord& goal) const {
+    return MapQuery::hasRiverBetween(*this, start, goal);
+}
+
+Coord MapQuery::clampToMap(const Map& map, Coord c) {
+    c.x = std::max(0, std::min(c.x, map.getWidth() - 1));
+    c.y = std::max(0, std::min(c.y, map.getHeight() - 1));
+    return c;
+}
+
+Coord MapQuery::nearestPassable(const Map& map, Coord c, int radius) {
+    c = clampToMap(map, c);
+    if (map.inBounds(c) && map.getTile(c).isPassable()) {
+        return c;
+    }
+    for (int r = 1; r <= radius; ++r) {
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                Coord cand{c.x + dx, c.y + dy};
+                if (!map.inBounds(cand)) continue;
+                if (map.getTile(cand).isPassable()) return cand;
+            }
+        }
+    }
+    return c;
+}
+
+MapQuery::ReachableGrid MapQuery::buildReachableGrid(const Map& map,
+                                                     const Coord& start) {
+    ReachableGrid grid;
+    grid.width = map.getWidth();
+    grid.height = map.getHeight();
+    grid.reachable.assign(static_cast<std::size_t>(grid.width * grid.height), 0);
+
+    if (!map.inBounds(start)) return grid;
+    if (!map.getTile(start).isPassable()) return grid;
+
+    std::queue<Coord> q;
+    std::vector<Coord> nbrs;
+    q.push(start);
+    grid.reachable[static_cast<std::size_t>(start.y) * grid.width + start.x] = 1;
+
+    while (!q.empty()) {
+        Coord cur = q.front();
+        q.pop();
+        map.getNeighbors(cur, nbrs);
+        for (const auto& n : nbrs) {
+            if (!map.inBounds(n)) continue;
+            if (!map.getTile(n).isPassable()) continue;
+            std::size_t idx = static_cast<std::size_t>(n.y) * grid.width + n.x;
+            if (grid.reachable[idx]) continue;
+            grid.reachable[idx] = 1;
+            q.push(n);
+        }
+    }
+
+    return grid;
+}
+
+Coord MapQuery::nearestReachableToTarget(const Map& map,
+                                         const ReachableGrid& reachable,
+                                         const Coord& target) {
+    Coord best = target;
+    int bestDist = 0;
+    bool found = false;
+    for (int y = 0; y < map.getHeight(); ++y) {
+        for (int x = 0; x < map.getWidth(); ++x) {
+            Coord cand{x, y};
+            if (!map.getTile(cand).isPassable()) continue;
+            if (!reachable.isReachable(cand)) continue;
+            int dist = cand.mhtDistanceTo(target);
+            if (!found || dist < bestDist ||
+                (dist == bestDist &&
+                 (cand.y < best.y || (cand.y == best.y && cand.x < best.x)))) {
+                best = cand;
+                bestDist = dist;
+                found = true;
+            }
+        }
+    }
+    return found ? best : target;
+}
+
+bool MapQuery::inAttackRange(const Map& map,
+                             const Coord& selfPos,
+                             const UnitStats& stats,
+                             const Coord& targetPos) {
+    const Tile& tile = map.getTile(selfPos);
+    float effectiveRange = stats.attackRange + tile.getVisionBonus();
+    float dist = selfPos.mhtDistanceTo(targetPos);
+    if (dist > effectiveRange) return false;
+    if (map.hasMountainBetween(selfPos, targetPos)) return false;
+    if (stats.attackRange <= 2.0f &&
+        map.hasRiverBetween(selfPos, targetPos)) {
+        return false;
+    }
+    return true;
+}
+
+bool MapQuery::inAttackRangeFrom(const Map& map,
+                                 const Coord& from,
+                                 const UnitStats& stats,
+                                 const Coord& targetPos) {
+    if (!map.inBounds(from)) return false;
+    const Tile& tile = map.getTile(from);
+    float effectiveRange = stats.attackRange + tile.getVisionBonus();
+    float dist = from.mhtDistanceTo(targetPos);
+    if (dist > effectiveRange) return false;
+    if (map.hasMountainBetween(from, targetPos)) return false;
+    if (stats.attackRange <= 2.0f &&
+        map.hasRiverBetween(from, targetPos)) {
+        return false;
+    }
+    return true;
+}
+
+bool MapQuery::lineHasType(const Map& map,
+                           const Coord& start,
+                           const Coord& goal,
+                           TileType type) {
     int x0 = start.x;
     int y0 = start.y;
     int x1 = goal.x;
@@ -209,14 +333,140 @@ bool lineHasType(const Map& map, const Coord& start, const Coord& goal, TileType
     }
     return false;
 }
-} // namespace
 
-bool Map::hasMountainBetween(const Coord& start, const Coord& goal) const {
-    return lineHasType(*this, start, goal, TileType::MOUNTAIN);
+bool MapQuery::hasMountainBetween(const Map& map,
+                                  const Coord& start,
+                                  const Coord& goal) {
+    return lineHasType(map, start, goal, TileType::MOUNTAIN);
 }
 
-bool Map::hasRiverBetween(const Coord& start, const Coord& goal) const {
-    return lineHasType(*this, start, goal, TileType::RIVER);
+bool MapQuery::hasRiverBetween(const Map& map,
+                               const Coord& start,
+                               const Coord& goal) {
+    return lineHasType(map, start, goal, TileType::RIVER);
+}
+
+bool PathPlanner::findPathAStarHeat(const Map& map,
+                                    const Coord& start,
+                                    const Coord& goal,
+                                    const std::vector<float>& heat,
+                                    int unitId,
+                                    std::vector<Coord>& outpath) {
+    outpath.clear();
+    if (!map.inBounds(start) || !map.inBounds(goal)) return false;
+    if (!map.getTile(start).isPassable() || !map.getTile(goal).isPassable()) return false;
+
+    const int width = map.getWidth();
+    const int height = map.getHeight();
+    struct Node {
+        Coord pos;
+        float g;
+        float f;
+        std::uint32_t tie;
+    };
+    auto cmp = [](const Node& a, const Node& b) {
+        if (std::abs(a.f - b.f) > 1e-4f) return a.f > b.f;
+        if (std::abs(a.g - b.g) > 1e-4f) return a.g > b.g;
+        return a.tie > b.tie;
+    };
+
+    std::priority_queue<Node, std::vector<Node>, decltype(cmp)> open(cmp);
+    std::vector<std::vector<float>> gScore(
+        height, std::vector<float>(width, 1e9f));
+    std::vector<std::vector<std::uint32_t>> tieScore(
+        height, std::vector<std::uint32_t>(width, std::numeric_limits<std::uint32_t>::max()));
+    std::vector<std::vector<Coord>> cameFrom(
+        height, std::vector<Coord>(width, Coord(-1, -1)));
+
+    gScore[start.y][start.x] = 0.0f;
+    std::uint32_t startTie = Coord::stableHash(unitId, start);
+    tieScore[start.y][start.x] = startTie;
+    open.push({start, 0.0f, static_cast<float>(Coord::mhtDistance(start, goal)), startTie});
+    std::vector<Coord> nbrs;
+
+    while (!open.empty()) {
+        Node cur = open.top();
+        open.pop();
+        if (cur.g > gScore[cur.pos.y][cur.pos.x] + 1e-4f) continue;
+
+        if (cur.pos == goal) {
+            Coord p = goal;
+            while (!(p == start)) {
+                outpath.push_back(p);
+                p = cameFrom[p.y][p.x];
+            }
+            outpath.push_back(start);
+            std::reverse(outpath.begin(), outpath.end());
+            return true;
+        }
+
+        map.getNeighbors(cur.pos, nbrs);
+        for (const auto& n : nbrs) {
+            const Tile& t = map.getTile(n);
+            if (!t.isPassable()) continue;
+
+            float heatValue = 0.f;
+            if (width > 0 && !heat.empty()) {
+                std::size_t idx = static_cast<std::size_t>(n.y) * width + n.x;
+                if (idx < heat.size()) {
+                    heatValue = heat[idx];
+                }
+            }
+            float heatCost = 0.35f * heatValue;
+            float tentativeG = cur.g + t.getMoveCost() + heatCost;
+            std::uint32_t tie = Coord::stableHash(unitId, n);
+
+            bool better = false;
+            float prevG = gScore[n.y][n.x];
+            if (tentativeG < prevG - 1e-4f) {
+                better = true;
+            } else if (std::abs(tentativeG - prevG) <= 1e-4f && tie < tieScore[n.y][n.x]) {
+                better = true;
+            }
+            if (better) {
+                gScore[n.y][n.x] = tentativeG;
+                tieScore[n.y][n.x] = tie;
+                cameFrom[n.y][n.x] = cur.pos;
+                float f = tentativeG + static_cast<float>(Coord::mhtDistance(n, goal));
+                open.push({n, tentativeG, f, tie});
+            }
+        }
+    }
+    return false;
+}
+
+void PathPlanner::rebuildPathStateHeat(const Map& map,
+                                       const Coord& start,
+                                       const Coord& target,
+                                       const std::vector<float>& heat,
+                                       int unitId,
+                                       std::vector<Coord>& path,
+                                       std::size_t& idx,
+                                       float& accumulator,
+                                       Coord& lastTarget,
+                                       bool& hasLast) {
+    path.clear();
+    findPathAStarHeat(map, start, target, heat, unitId, path);
+    idx = 0;
+    accumulator = 0.f;
+    lastTarget = target;
+    hasLast = true;
+}
+
+void PathPlanner::rebuildPathState(const Map& map,
+                                   const Coord& start,
+                                   const Coord& target,
+                                   std::vector<Coord>& path,
+                                   std::size_t& idx,
+                                   float& accumulator,
+                                   Coord& lastTarget,
+                                   bool& hasLast) {
+    path.clear();
+    map.findPathAStar(start, target, path);
+    idx = 0;
+    accumulator = 0.f;
+    lastTarget = target;
+    hasLast = true;
 }
 
 //Mapgenerator
@@ -369,5 +619,3 @@ void MapGenerator::applySwampArdRivers(
 bool MapGenerator::validateMap(const Map& map, const Coord& baseA, const Coord& baseB) const {
     return map.isReachable(baseA, baseB);
 }
-
-
