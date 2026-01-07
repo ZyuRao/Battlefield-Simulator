@@ -161,7 +161,7 @@ void TaskPool::submit(Job job, std::shared_ptr<TaskGroup> group) {
             job();
 #ifndef NDEBUG
             if (group && !group->isAlive()) {
-                debugAbort("worker before done on dead group", group.get(), group->debugCount());
+                TaskGroup::debugAbort("worker before done on dead group", group.get(), group->debugCount());
             }
 #endif
             if (group) group->done();

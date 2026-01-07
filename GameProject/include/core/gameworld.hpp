@@ -52,9 +52,7 @@ private:
     std::atomic<bool> alive{true};
     std::mutex mutex;
     std::condition_variable cv;
-#ifndef NDEBUG
-    static void debugAbort(const char* msg, const TaskGroup* group, int value);
-#endif
+
 
 public:
     ~TaskGroup();
@@ -63,6 +61,9 @@ public:
     void wait();
     bool isAlive() const { return alive.load(std::memory_order_acquire); }
     int debugCount() const { return count.load(std::memory_order_acquire); }
+#ifndef NDEBUG
+    static void debugAbort(const char* msg, const TaskGroup* group, int value);
+#endif
 };
 
 class TaskPool {
